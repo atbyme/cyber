@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .scraper import realtime_scan, deep_research_scan, get_source_stats, get_type_breakdown, extract_knowledge, THREAT_SOURCES
 from .cleaner import filter_and_clean, format_for_training
-from .analyzer import digital_footprint, scan_ports
+from .analyzer import digital_footprint, scan_ports, resolve_dns, check_threat_intel
 from .linux_knowledge import get_linux_training_data
 from .modelscope_trainer import (
     prepare_dataset, generate_swift_config, save_swift_yaml,
@@ -37,6 +37,8 @@ app_state = {
     "notifications": [], "analysis_history": [],
     "connected_clients": set(),
     "research_activity": [],
+    "monitored_entities": [],
+    "footprint_history": [],
     "learning": True,
 }
 
@@ -48,11 +50,39 @@ class AnalyzeReq(BaseModel):
     scan_ports: bool = False
 
 
+async def _footprint_monitor_loop():
+    await asyncio.sleep(20)
+    analyzed_set = set()
+    while app_state["learning"]:
+        try:
+            targets = []
+            for t in app_state["recent_threats"][:50]:
+                ioc = t.get("ioc") or t.get("url") or t.get("instruction", "").split(":")[-1].strip() or ""
+                if ioc and ioc not in analyzed_set:
+                    targets.append(ioc)
+                    analyzed_set.add(ioc)
+            for target in targets[:10]:
+                try:
+                    result = await asyncio.to_thread(digital_footprint, target)
+                    entry = {"target": target, "timestamp": datetime.now(timezone.utc).isoformat(), "result": result}
+                    app_state["monitored_entities"].insert(0, entry)
+                    if len(app_state["monitored_entities"]) > 200:
+                        app_state["monitored_entities"] = app_state["monitored_entities"][:200]
+                except Exception as e:
+                    logger.debug(f"Footprint fail for {target}: {e}")
+            if targets:
+                await _broadcast("footprint_update", {"new": len(targets[:10]), "total": len(app_state["monitored_entities"])})
+        except Exception as e:
+            logger.error(f"Footprint monitor error: {e}")
+        await asyncio.sleep(120)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("AURA starting — passive internet research + 2h deep cycle")
+    logger.info("AURA starting — real-time internet monitoring active")
     asyncio.create_task(_passive_research_loop())
     asyncio.create_task(_deep_research_loop())
+    asyncio.create_task(_footprint_monitor_loop())
     yield
     logger.info("AURA stopping")
 
@@ -288,6 +318,20 @@ async def start_train():
 @app.get("/api/analysis/history")
 async def analysis_hist(limit: int = 20):
     return app_state["analysis_history"][-limit:]
+
+
+@app.get("/api/monitor")
+async def get_monitored(limit: int = 50):
+    return app_state["monitored_entities"][:limit]
+
+
+@app.get("/api/monitor/stats")
+async def monitor_stats():
+    malicious = sum(1 for e in app_state["monitored_entities"] if e.get("result", {}).get("threat", {}).get("malicious"))
+    clean = sum(1 for e in app_state["monitored_entities"] if e.get("result", {}).get("threat") is None)
+    iocs = sum(1 for e in app_state["monitored_entities"] if e.get("result", {}).get("analysis", {}).get("ioc"))
+    ips = sum(1 for e in app_state["monitored_entities"] if "." in e.get("target", "") and e["target"].replace(".", "").isdigit())
+    return {"total": len(app_state["monitored_entities"]), "malicious": malicious, "clean": clean, "iocs": iocs, "ips": ips}
 
 
 @app.websocket("/ws")

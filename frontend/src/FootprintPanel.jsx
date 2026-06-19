@@ -1,114 +1,100 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+
+function EntityCard({ entity }) {
+  const r = entity.result || {}
+  const analysis = r.analysis || {}
+  const isMalicious = r.threat?.malicious || analysis.ioc?.malicious
+  const isIP = analysis.ip
+  const isDomain = analysis.domain
+  const isURL = analysis.url
+  const type = isIP ? 'IP' : isDomain ? 'Domain' : isURL ? 'URL' : 'IOC'
+
+  return (
+    <div style={{ background: 'var(--bg-hover)', borderRadius: 8, padding: 12, border: `1px solid ${isMalicious ? 'var(--accent-red)' : 'var(--border)'}`, marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <strong style={{ fontSize: 13, fontFamily: 'monospace' }}>{entity.target}</strong>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span className={`tag ${isMalicious ? 'tag-malicious' : 'tag-clean'}`}>{isMalicious ? '⚠ Threat' : 'Clean'}</span>
+          <span className="tag tag-cve">{type}</span>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 11, color: 'var(--text-secondary)' }}>
+        {analysis.ip?.hostname && <div>Hostname: {analysis.ip.hostname}</div>}
+        {isDomain && analysis.domain?.dns?.ips && <div>IPs: {analysis.domain.dns.ips.join(', ')}</div>}
+        {r.whois?.registrar && <div>Registrar: {r.whois.registrar}</div>}
+        {r.whois?.country && <div>Country: {r.whois.country}</div>}
+        {r.port_scan && r.port_scan.length > 0 && <div>Open Ports: {r.port_scan.map(p => p.port).join(', ')}</div>}
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 4, opacity: 0.5 }}>
+        {new Date(entity.timestamp).toLocaleString()}
+      </div>
+    </div>
+  )
+}
 
 export default function FootprintPanel() {
+  const [monitored, setMonitored] = useState([])
+  const [stats, setStats] = useState({ total: 0, malicious: 0, clean: 0, iocs: 0, ips: 0 })
   const [target, setTarget] = useState('')
-  const [result, setResult] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [history, setHistory] = useState([])
+  const [manualResult, setManualResult] = useState(null)
+  const [analyzing, setAnalyzing] = useState(false)
 
-  const analyze = async () => {
+  useEffect(() => {
+    const f = () => {
+      fetch('/api/monitor?limit=50').then(r => r.json()).then(setMonitored).catch(() => {})
+      fetch('/api/monitor/stats').then(r => r.json()).then(setStats).catch(() => {})
+    }
+    f()
+    const i = setInterval(f, 4000)
+    return () => clearInterval(i)
+  }, [])
+
+  const manualAnalyze = async () => {
     if (!target.trim()) return
-    setLoading(true)
-    setError('')
-    setResult(null)
+    setAnalyzing(true)
     try {
       const r = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target: target.trim(), scan_ports: true }),
       })
-      const d = await r.json()
-      setResult(d)
-      setHistory(prev => [{ target: target.trim(), timestamp: new Date().toLocaleString(), result: d }, ...prev].slice(0, 20))
-    } catch { setError('Analysis failed') }
-    finally { setLoading(false) }
+      setManualResult(await r.json())
+    } catch {}
+    setAnalyzing(false)
   }
-
-  const handleKeyDown = (e) => { if (e.key === 'Enter') analyze() }
 
   return (
     <div>
-      <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 24 }}>Digital Footprint Analysis</h1>
-      <div className="panel">
-        <h2>Analyze Target</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 14 }}>
-          Enter an IP address, domain, URL, or IOC to analyze its digital footprint, DNS records, WHOIS data, and threat intelligence.
-        </p>
-        <div className="analysis-form">
-          <input
-            type="text"
-            placeholder="e.g., example.com, 8.8.8.8, or a suspicious URL"
-            value={target}
-            onChange={e => setTarget(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-          <button className="btn btn-primary" onClick={analyze} disabled={loading || !target.trim()}>
-            {loading ? 'Analyzing...' : 'Analyze'}
-          </button>
-        </div>
-        {error && <p style={{ color: 'var(--accent-red)', marginTop: 8 }}>{error}</p>}
+      <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4 }}>Real-Time Footprint Monitor</h1>
+      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 24 }}>
+        Auto-monitoring all discovered IOCs · Live updates every 4s · {stats.total} entities tracked
+      </p>
+
+      <div className="dashboard-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
+        <div className="stat-card"><div className="label">Monitored Entities</div><div className="value" style={{ color: 'var(--accent-cyan)', fontSize: 22 }}>{stats.total}</div><div className="sub">Auto-tracked</div></div>
+        <div className="stat-card"><div className="label">Threats Detected</div><div className="value" style={{ color: 'var(--accent-red)', fontSize: 22 }}>{stats.malicious}</div><div className="sub">Malicious</div></div>
+        <div className="stat-card"><div className="label">Clean Entities</div><div className="value" style={{ color: 'var(--accent-green)', fontSize: 22 }}>{stats.clean}</div><div className="sub">No threats</div></div>
+        <div className="stat-card"><div className="label">IOCs Analyzed</div><div className="value" style={{ color: 'var(--accent-yellow)', fontSize: 22 }}>{stats.iocs}</div><div className="sub">Indicators</div></div>
+        <div className="stat-card"><div className="label">IPs Tracked</div><div className="value" style={{ color: 'var(--accent-purple)', fontSize: 22 }}>{stats.ips}</div><div className="sub">Addresses</div></div>
       </div>
 
-      {result && (
-        <div className="panel">
-          <h2>Results: {result.target}</h2>
-          <pre>{JSON.stringify(result, null, 2)}</pre>
-          {result.port_scan && result.port_scan.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <h3 style={{ color: 'var(--accent-red)', marginBottom: 8, fontSize: 14 }}>Open Ports</h3>
-              <table>
-                <thead>
-                  <tr><th>Port</th><th>State</th></tr>
-                </thead>
-                <tbody>
-                  {result.port_scan.map((p, i) => (
-                    <tr key={i}><td>{p.port}</td><td><span className="tag tag-malicious">{p.state}</span></td></tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+      <div className="panel">
+        <h2>Manual Analysis</h2>
+        <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+          <input type="text" placeholder="IP, domain, URL, or IOC to analyze..." value={target} onChange={e => setTarget(e.target.value)} onKeyDown={e => e.key === 'Enter' && manualAnalyze()} style={{ flex: 1, padding: '10px 16px', background: 'var(--bg-hover)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 14 }} />
+          <button className="btn btn-primary" onClick={manualAnalyze} disabled={analyzing || !target.trim()}>{analyzing ? 'Analyzing...' : 'Analyze'}</button>
         </div>
-      )}
+        {manualResult && <pre style={{ fontSize: 11, maxHeight: 200, overflow: 'auto' }}>{JSON.stringify(manualResult, null, 2)}</pre>}
+      </div>
 
-      {history.length > 0 && (
-        <div className="panel">
-          <h2>Analysis History <span className="badge">{history.length} entries</span></h2>
-          <div className="threat-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Target</th>
-                  <th>Type</th>
-                  <th>Threat</th>
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((h, i) => {
-                  const r = h.result
-                  const hasThreat = r?.threat?.malicious || r?.analysis?.ioc?.malicious
-                  const analysis = r?.analysis || {}
-                  const type = analysis.ip ? 'IP' : analysis.domain ? 'Domain' : analysis.url ? 'URL' : 'IOC'
-                  return (
-                    <tr key={i} onClick={() => { setTarget(h.target); setResult(r) }} style={{ cursor: 'pointer' }}>
-                      <td style={{ color: 'var(--text-secondary)' }}>{h.timestamp}</td>
-                      <td>{h.target}</td>
-                      <td><span className="tag tag-cve">{type}</span></td>
-                      <td>
-                        {hasThreat
-                          ? <span className="tag tag-malicious">Malicious</span>
-                          : <span className="tag tag-clean">Clean</span>}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+      <div className="panel">
+        <h2>Auto-Monitored Live Feed <span className="badge">{monitored.length} entities · updates every 4s</span></h2>
+        {monitored.length > 0 ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            {monitored.map((e, i) => <EntityCard key={i} entity={e} />)}
           </div>
-        </div>
-      )}
+        ) : <div className="loading"><div className="spinner" /> Auto-monitoring started — waiting for data...</div>}
+      </div>
     </div>
   )
 }
