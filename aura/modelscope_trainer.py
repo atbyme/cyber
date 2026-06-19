@@ -138,6 +138,44 @@ def get_training_command(config_path: str, cloud: bool = True) -> str:
     return f"swift train --config {config_path}"
 
 
+def push_dataset_to_hub(dataset_path: Path, dataset_name: str = "aura-cyber-dataset") -> str:
+    instructions = f"""# Push dataset to ModelScope Hub
+# Step 1: Install ModelScope
+!pip install modelscope -U
+
+# Step 2: Upload to ModelScope Dataset Hub
+from modelscope.hub.api import HubApi
+from modelscope.hub.repository import Repository
+import os
+
+api = HubApi()
+api.login('YOUR_MODELSCOPE_TOKEN')
+
+dataset_dir = '{dataset_path}'
+dataset_name = '{dataset_name}'
+
+# Create dataset on ModelScope Hub (one-time)
+api.create_dataset(dataset_name, 'AURA cyber threat + Linux command training dataset')
+
+# Clone and push
+repo = Repository(local_dir='./aura-dataset-repo', clone_from=dataset_name)
+for f in os.listdir(dataset_dir):
+    !cp {{dataset_dir}}/{{f}} ./aura-dataset-repo/
+repo.push('Initial dataset upload')
+
+# Step 3: Or use ModelScope CLI
+# pip install modelscope
+# python -c "
+# from modelscope.hub.api import HubApi
+# api = HubApi()
+# api.login('<token>')
+# api.create_dataset('aura-cyber/<dataset_name>', 'AURA training dataset')
+# "
+"""
+    logger.info(f"Dataset push instructions generated for {dataset_name}")
+    return instructions
+
+
 def generate_colab_notebook(dataset_name: str, model_name: str) -> str:
     return f'''# AURA Cloud Training - ModelScope MS-SWIFT
 # Dataset: {dataset_name} | Model: {model_name}

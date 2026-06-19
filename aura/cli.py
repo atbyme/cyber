@@ -24,6 +24,7 @@ from .modelscope_trainer import (
     format_for_modelscope,
     merge_datasets,
     get_training_command,
+    push_dataset_to_hub,
     SUPPORTED_MODELS,
 )
 
@@ -228,6 +229,48 @@ def cmd_config(args):
         console.print("[dim]Keys: modelscope.api_key, modelscope.model_name, scraper.nvd_api_key, training.epochs, etc.[/]")
 
 
+def cmd_dataset(args):
+    from .config import DATASETS_DIR
+    datasets = sorted(DATASETS_DIR.iterdir()) if DATASETS_DIR.exists() else []
+    if args.action == "list":
+        if not datasets:
+            console.print("[yellow]No datasets found. Run 'aura train' first.[/]")
+            return
+        table = Table(title="Local Datasets", box=box.ROUNDED)
+        table.add_column("#", style="dim")
+        table.add_column("Dataset", style="cyan")
+        table.add_column("Samples", style="yellow")
+        table.add_column("Created", style="green")
+        for i, d in enumerate(datasets, 1):
+            config_file = d / "config.json"
+            samples = ""
+            created = ""
+            if config_file.exists():
+                with open(config_file) as f:
+                    cfg = json.load(f)
+                    samples = str(cfg.get("total_samples", ""))
+                    created = cfg.get("created_at", "")
+            table.add_row(str(i), d.name, samples, created)
+        console.print(table)
+    elif args.action == "push":
+        if not datasets:
+            console.print("[yellow]No datasets to push. Run 'aura train' first.[/]")
+            return
+        target = datasets[-1]
+        console.print(f"[cyan]Preparing dataset for ModelScope push: {target.name}[/]")
+        instructions = push_dataset_to_hub(target, args.name or "aura-cyber-dataset")
+        console.print(Panel(
+            instructions,
+            title="Dataset Push Instructions",
+            border_style="green",
+        ))
+        console.print("\n[bold yellow]Steps:[/]")
+        console.print("1. Get your ModelScope token from https://modelscope.cn/my/accessToken")
+        console.print("2. Run: [bold]aura config modelscope.api_key <token>[/]")
+        console.print(f"3. Dataset folder: [bold]{target}[/]")
+        console.print("4. Upload to ModelScope Hub using the Python script above")
+
+
 def cmd_list_models(args):
     table = Table(title="Supported ModelScope Models", box=box.ROUNDED)
     table.add_column("#", style="dim")
@@ -251,7 +294,9 @@ Examples:
   aura linux                            List Linux command categories
   aura linux -c "Network"               Show network commands
   aura train -d data.json               Prepare dataset for ModelScope training
-  aura config modelscope.api_key <key>  Set API key
+  aura config modelscope.api_key <key>  Set ModelScope API key
+  aura dataset list                     List local datasets
+  aura dataset push                     Push dataset to ModelScope Hub
   aura models                           List supported models
         """,
     )
@@ -285,6 +330,10 @@ Examples:
     p_config.add_argument("key", nargs="?", help="Config key")
     p_config.add_argument("value", nargs="?", help="Config value")
 
+    p_dataset = sub.add_parser("dataset", help="Manage ModelScope datasets")
+    p_dataset.add_argument("action", choices=["list", "push"], help="List local datasets or push to ModelScope Hub")
+    p_dataset.add_argument("-n", "--name", help="Dataset name on ModelScope Hub")
+
     sub.add_parser("models", help="List supported ModelScope models")
 
     args = parser.parse_args()
@@ -302,6 +351,7 @@ Examples:
         "linux": cmd_linux,
         "train": cmd_train,
         "config": cmd_config,
+        "dataset": cmd_dataset,
         "models": cmd_list_models,
     }
     cmds[args.command](args)
