@@ -4,80 +4,73 @@ import ScraperPanel from './ScraperPanel'
 import TrainingPanel from './TrainingPanel'
 import FootprintPanel from './FootprintPanel'
 
-const NAV = [
-  { key: 'dashboard', label: 'Dashboard', icon: '◉' },
-  { key: 'scraper', label: 'Threat Scraper', icon: '◈' },
-  { key: 'training', label: 'AI Training', icon: '◆' },
-  { key: 'footprint', label: 'Footprint Analysis', icon: '◎' },
-]
-
 export default function App() {
   const [page, setPage] = useState('dashboard')
-  const [status, setStatus] = useState({ scraper: {}, training: {} })
+  const [status, setStatus] = useState({})
   const [connected, setConnected] = useState(false)
-  const wsRef = useRef(null)
+  const [notifications, setNotifications] = useState([])
+  const [showN, setShowN] = useState(false)
+  const [unread, setUnread] = useState(0)
+  const ws = useRef(null)
 
-  const connectWs = useCallback(() => {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host.includes('5173') ? 'localhost:8000' : window.location.host
-    const ws = new WebSocket(`${proto}//${host}/ws`)
-    ws.onopen = () => { setConnected(true) }
-    ws.onmessage = (e) => {
+  const connect = useCallback(() => {
+    const host = location.host.includes('5173') ? 'localhost:8000' : location.host
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const s = new WebSocket(`${proto}//${host}/ws`)
+    s.onopen = () => setConnected(true)
+    s.onmessage = e => {
       try {
-        const msg = JSON.parse(e.data)
-        if (msg.event === 'scrape_update') {
-          setStatus(prev => ({ ...prev, scraper: { ...prev.scraper, lastScrape: msg.data } }))
-        }
-        if (msg.event === 'train_status') {
-          setStatus(prev => ({ ...prev, training: { ...prev.training, running: true, samples: msg.data.samples } }))
-        }
-        if (msg.event === 'train_complete') {
-          setStatus(prev => ({ ...prev, training: { ...prev.training, running: false, lastTrain: msg.data } }))
-        }
-        if (msg.event === 'train_error') {
-          setStatus(prev => ({ ...prev, training: { ...prev.training, running: false, error: msg.data.error } }))
-        }
+        const m = JSON.parse(e.data)
+        if (m.event === 'notification') { setNotifications(p => [m.data, ...p].slice(0, 200)); setUnread(c => c + 1) }
+        if (m.event === 'notifications_cleared') { setNotifications([]); setUnread(0) }
+        if (m.event === 'scrape_update') setStatus(p => ({ ...p, scraper: { ...p.scraper, lastScrape: m.data } }))
+        if (m.event === 'train_status') setStatus(p => ({ ...p, training: { ...p.training, running: true, samples: m.data.samples } }))
+        if (m.event === 'train_complete') setStatus(p => ({ ...p, training: { ...p.training, running: false, lastTrain: m.data } }))
       } catch {}
     }
-    ws.onclose = () => { setConnected(false); setTimeout(connectWs, 3000) }
-    ws.onerror = () => ws.close()
-    wsRef.current = ws
+    s.onclose = () => { setConnected(false); setTimeout(connect, 2000) }
+    ws.current = s
   }, [])
 
-  useEffect(() => {
-    connectWs()
-    fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {})
-    const interval = setInterval(() => {
-      fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {})
-    }, 5000)
-    return () => { clearInterval(interval); wsRef.current?.close() }
-  }, [connectWs])
+  useEffect(() => { connect(); fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {}); fetch('/api/notifications').then(r => r.json()).then(n => { setNotifications(n); setUnread(0) }).catch(() => {}); const i = setInterval(() => fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {}), 5000); return () => { clearInterval(i); ws.current?.close() } }, [connect])
 
-  const pages = { dashboard: Dashboard, scraper: ScraperPanel, training: TrainingPanel, footprint: FootprintPanel }
-  const Page = pages[page]
+  const clearN = async () => { await fetch('/api/notifications/clear', { method: 'POST' }); setNotifications([]); setUnread(0) }
+
+  const P = { dashboard: Dashboard, scraper: ScraperPanel, training: TrainingPanel, footprint: FootprintPanel }[page]
 
   return (
     <div className="layout">
       <aside className="sidebar">
         <div className="logo">AURA <span>AI</span></div>
-        <nav>
-          {NAV.map(n => (
-            <button
-              key={n.key}
-              className={page === n.key ? 'active' : ''}
-              onClick={() => setPage(n.key)}
-            >
-              {n.icon} {n.label}
-            </button>
-          ))}
-        </nav>
-        <div style={{ padding: '16px 20px', borderTop: '1px solid var(--border)', fontSize: 12, color: 'var(--text-secondary)' }}>
-          <span className={`status-dot ${connected ? 'online' : 'offline'}`} />
-          {connected ? 'Server Connected' : 'Reconnecting...'}
+        <nav>{Object.entries({ dashboard: '◉ Dashboard', scraper: '◈ Threat Scraper', training: '◆ AI Training', footprint: '◎ Footprint' }).map(([k, v]) => (
+          <button key={k} className={page === k ? 'active' : ''} onClick={() => setPage(k)}>{v}</button>
+        ))}</nav>
+        <div style={{ padding: '12px 16px', borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-secondary)' }}>
+          <span className={`status-dot ${connected ? 'online' : 'offline'}`} />{connected ? 'Live' : 'Reconnecting'}
+          <div style={{ marginTop: 4 }}>Cycle: every 60s · Cloud: ModelScope</div>
         </div>
       </aside>
-      <main className="main-content">
-        <Page status={status} />
+      <main style={{ marginLeft: 260, flex: 1, padding: 32, maxWidth: 1400, position: 'relative' }}>
+        <div style={{ position: 'fixed', top: 28, right: 28, zIndex: 1000 }}>
+          <button className="btn" style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', padding: '8px 14px', borderRadius: 8, cursor: 'pointer', color: 'var(--text-primary)', fontSize: 16, position: 'relative' }} onClick={() => setShowN(!showN)}>
+            🔔{unread > 0 && <span style={{ position: 'absolute', top: -6, right: -6, background: 'var(--accent-red)', color: 'white', borderRadius: '50%', width: 18, height: 18, fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{unread > 9 ? '9+' : unread}</span>}
+          </button>
+          {showN && <div style={{ position: 'absolute', top: 44, right: 0, width: 380, background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 12, maxHeight: 500, overflow: 'auto', boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--border)' }}>
+              <strong style={{ fontSize: 14 }}>Notifications</strong>
+              <button onClick={clearN} style={{ background: 'none', border: 'none', color: 'var(--accent-cyan)', cursor: 'pointer', fontSize: 12 }}>Clear</button>
+            </div>
+            {notifications.length === 0 ? <div style={{ padding: 20, color: 'var(--text-secondary)', textAlign: 'center', fontSize: 13 }}>No notifications</div> :
+              notifications.map(n => (
+                <div key={n.id} style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', borderLeft: `3px solid ${n.level === 'error' ? 'var(--accent-red)' : n.level === 'warning' ? 'var(--accent-yellow)' : 'var(--accent-green)'}` }}>
+                  <div style={{ fontSize: 13, fontWeight: 500 }}>{n.title}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{n.message}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 2, opacity: 0.5 }}>{new Date(n.timestamp).toLocaleTimeString()}</div>
+                </div>
+              ))}
+          </div>}
+        </div>
+        <P status={status} />
       </main>
     </div>
   )
