@@ -1,114 +1,658 @@
-import { useState, useEffect } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
-export default function Dashboard({ status }) {
-  const [threats, setThreats] = useState([])
-  const [models, setModels] = useState([])
-  const [knowledge, setKnowledge] = useState({})
+const WS_HOST = location.host.includes('5173') ? 'localhost:8000' : location.host
+const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:'
+
+const COLORS = { critical: '#ef4444', high: '#f59e0b', medium: '#06b6d4', low: '#8b5cf6' }
+const TYPE_COLORS = { cve: '#ef4444', ioc: '#f59e0b', botnet: '#f97316', malicious_ssl: '#ec4899', malicious_url: '#8b5cf6', phishing_url: '#a855f7', malware_url: '#d946ef', exploit: '#ef4444', cert: '#06b6d4', pulse: '#14b8a6', crawl_result: '#64748b' }
+
+function riskLevel(score) {
+  if (!score || score < 10) return 'low'
+  if (score < 40) return 'medium'
+  if (score < 70) return 'high'
+  return 'critical'
+}
+
+function ThreatCard({ t, onClick }) {
+  const risk = riskLevel(t.score)
+  const url = t.url || t.ioc || ''
+  const desc = t.instruction || t.response || t.description || ''
+  return (
+    <div className={`threat-card ${risk}`} style={{ cursor: 'pointer' }} onClick={() => onClick?.(t)}>
+      <div className="threat-card-header">
+        <span className={`threat-card-type ${risk}`}>{t.type || 'unknown'}</span>
+        <span className={`threat-card-risk ${risk}`}>{risk.toUpperCase()} {(t.score || 0)}</span>
+      </div>
+      <div className="threat-card-source">{t.source || 'unknown'}</div>
+      {desc && <div className="threat-card-desc" title={desc}>{desc.slice(0, 160)}</div>}
+      {url && <div className="threat-card-url" title={url}>{url.slice(0, 100)}</div>}
+      <div className="threat-card-meta">
+        <span className="threat-card-time">{new Date(t.t || Date.now()).toLocaleTimeString()}</span>
+        {t.malware && <span>Malware: {t.malware}</span>}
+        {t.cvss_score && <span>CVSS: {t.cvss_score}</span>}
+      </div>
+    </div>
+  )
+}
+
+export default function Dashboard({ status: initialStatus, onThreatClick }) {
+  const [status, setStatus] = useState(initialStatus || {})
+  const [allThreats, setAllThreats] = useState([])
+  const [knowledge, setKnowledge] = useState({ cves: 0, iocs: 0, malware: 0, urls: 0, total: 0, history: [] })
+  const [sources, setSources] = useState({})
+  const [versions, setVersions] = useState([])
+  const [activity, setActivity] = useState([])
+  const [liveSources, setLiveSources] = useState({})
+  const [insights, setInsights] = useState([])
+  const [filterType, setFilterType] = useState('all')
+  const [filterRisk, setFilterRisk] = useState('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [viewMode, setViewMode] = useState('cards')
   const [threatHistory, setThreatHistory] = useState([])
+  const [aiAnalysis, setAiAnalysis] = useState(null)
+  const wsRef = useRef(null)
+  const pollRef = useRef(null)
 
-  useEffect(() => {
-    const f = () => {
-      fetch('/api/threats?limit=15').then(r => r.json()).then(setThreats).catch(() => {})
-      fetch('/api/models').then(r => r.json()).then(d => setModels(d.versions || [])).catch(() => {})
-      fetch('/api/knowledge').then(r => r.json()).then(setKnowledge).catch(() => {})
-      fetch('/api/threats/history').then(r => r.json()).then(setThreatHistory).catch(() => {})
-    }
-    f()
-    const i = setInterval(f, 8000)
-    return () => clearInterval(i)
+  const fetchThreats = useCallback(() => {
+    fetch('/api/threats?limit=200').then(r => r.json()).then(t => {
+      setAllThreats(t)
+      setThreatHistory(prev => {
+        const now = Date.now()
+        const recent = t.filter(th => th.t && (now - new Date(th.t).getTime()) < 300000)
+        const updated = [...prev, ...recent.map(th => ({ ...th, bucket: new Date(th.t || now).toLocaleTimeString() }))]
+        return updated.slice(-500)
+      })
+    }).catch(() => {})
   }, [])
 
-  const s = status.scraper || {}
-  const t = status.training || {}
-  const r = status.research || {}
-  const cycle = status.cycle || 0
-  const rcycle = status.research_cycle || 0
-  const total = s.total_scraped || 0
-  const k = knowledge
+  const fetchAll = useCallback(() => {
+    fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {})
+    fetchThreats()
+    fetch('/api/knowledge').then(r => r.json()).then(setKnowledge).catch(() => {})
+    fetch('/api/sources').then(r => r.json()).then(setSources).catch(() => {})
+    fetch('/api/train/versions').then(r => r.json()).then(d => setVersions(d.versions || [])).catch(() => {})
+    fetch('/api/insights').then(r => r.json()).then(setInsights).catch(() => {})
+  }, [fetchThreats])
 
-  const srcChart = {}
-  threats.forEach(x => { const src = x.source || '?'; srcChart[src] = (srcChart[src] || 0) + 1 })
-  const barData = Object.entries(srcChart).map(([n, v]) => ({ name: n.slice(0, 10), value: v }))
+  useEffect(() => {
+    fetchAll()
+    pollRef.current = setInterval(fetchAll, 3000)
+    return () => clearInterval(pollRef.current)
+  }, [fetchAll])
 
-  const totalKnowledge = (k.unique_cves || 0) + (k.unique_iocs || 0) + (k.unique_malware || 0) + (k.unique_urls || 0)
+  useEffect(() => {
+    const ws = new WebSocket(`${WS_PROTO}//${WS_HOST}/ws`)
+    wsRef.current = ws
+    ws.onmessage = e => {
+      try {
+        const m = JSON.parse(e.data)
+        const now = new Date().toLocaleTimeString()
+
+        if (m.event === 'source_result') {
+          setLiveSources(p => ({ ...p, [m.data.source]: { count: m.data.count, scan_type: m.data.scan_type, cycle: m.data.cycle, t: m.t, fresh: true } }))
+          setTimeout(() => setLiveSources(p => {
+            const n = { ...p }
+            if (n[m.data.source]) n[m.data.source] = { ...n[m.data.source], fresh: false }
+            return n
+          }), 2000)
+          setThreatHistory(prev => [...prev, { type: 'source_result', source: m.data.source, count: m.data.count, bucket: now }].slice(-500))
+          fetchThreats()
+        }
+
+        if (m.event === 'research' || m.event === 'deep_research') {
+          setActivity(p => [{ event: m.event, data: m.data, t: m.t }, ...p].slice(0, 150))
+          if (m.data.knowledge) setKnowledge(m.data.knowledge)
+          setThreatHistory(prev => [...prev, { type: m.event, count: m.data.count, bucket: now }].slice(-500))
+          generateAiInsight(m)
+          fetchThreats()
+        }
+
+        if (m.event === 'crawl') {
+          setActivity(p => [{ event: m.event, data: m.data, t: m.t }, ...p].slice(0, 150))
+          fetchThreats()
+        }
+
+        if (m.event === 'passive_scan') {
+          setActivity(p => [{ event: m.event, data: m.data, t: m.t }, ...p].slice(0, 150))
+          fetchThreats()
+        }
+
+        if (m.event === 'footprint') {
+          setActivity(p => [{ event: m.event, data: m.data, t: m.t }, ...p].slice(0, 150))
+        }
+
+        if (m.event === 'research_insights') {
+          setActivity(p => [{ event: 'insights', data: m.data, t: m.t }, ...p].slice(0, 150))
+          setInsights(m.data.insights || [])
+        }
+
+        if (m.event === 'train_complete') {
+          setVersions(p => [{ cycle: m.data.cycle, version: m.data.version, samples: m.data.samples, t: m.t }, ...p].slice(0, 50))
+          setActivity(p => [{ event: 'train_complete', data: m.data, t: m.t }, ...p].slice(0, 150))
+        }
+
+        if (m.event === 'notification') {
+          setActivity(p => [{ event: 'notif', data: m.data, t: m.t }, ...p].slice(0, 150))
+        }
+      } catch {}
+    }
+    ws.onclose = () => {
+      setTimeout(() => {
+        if (wsRef.current === ws) {
+          const w = new WebSocket(`${WS_PROTO}//${WS_HOST}/ws`)
+          wsRef.current = w
+        }
+      }, 2000)
+    }
+    return () => ws.close()
+  }, [fetchThreats])
+
+  function generateAiInsight(m) {
+    const types = m.data.types || {}
+    const typeEntries = Object.entries(types)
+    const topType = typeEntries.sort((a, b) => b[1] - a[1])[0]
+    const typeLabels = typeEntries.map(([k]) => k).join(', ')
+    let insight = `Scan complete — ${m.data.count} threats. `
+    if (topType) insight += `Dominant: ${topType[0]} (${topType[1]}). `
+    if (m.data.count > 100) insight += '⚠ High volume detected. '
+    if (typeEntries.length > 5) insight += 'Broad threat diversity. '
+    if (m.data.sources) {
+      const srcEntries = Object.entries(m.data.sources)
+      const topSrc = srcEntries.sort((a, b) => b[1] - a[1])[0]
+      if (topSrc) insight += `Top source: ${topSrc[0]} (${topSrc[1]} threats). `
+    }
+    setAiAnalysis({ insight, at: new Date().toLocaleTimeString(), cycle: m.data.cycle, count: m.data.count })
+  }
+
+  const k = knowledge; const s = status
+  const totalK = (k.cves || 0) + (k.iocs || 0) + (k.malware || 0) + (k.urls || 0)
+  const sourceCount = Object.keys(sources).length
+  const lastEvent = activity[0]
+
+  const filteredThreats = useMemo(() => {
+    let ft = allThreats
+    if (filterType !== 'all') ft = ft.filter(t => t.type === filterType)
+    if (filterRisk !== 'all') ft = ft.filter(t => riskLevel(t.score) === filterRisk)
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase()
+      ft = ft.filter(t =>
+        (t.instruction || '').toLowerCase().includes(q) ||
+        (t.response || '').toLowerCase().includes(q) ||
+        (t.url || '').toLowerCase().includes(q) ||
+        (t.ioc || '').toLowerCase().includes(q) ||
+        (t.source || '').toLowerCase().includes(q)
+      )
+    }
+    return ft
+  }, [allThreats, filterType, filterRisk, searchQuery])
+
+  const uniqueTypes = useMemo(() => [...new Set(allThreats.map(t => t.type).filter(Boolean))], [allThreats])
+
+  const typeDist = useMemo(() => {
+    const map = {}
+    allThreats.slice(0, 300).forEach(t => { if (t.type) map[t.type] = (map[t.type] || 0) + 1 })
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value)
+  }, [allThreats])
+
+  const sourceDist = useMemo(() => {
+    const map = {}
+    allThreats.slice(0, 300).forEach(t => { if (t.source) map[t.source] = (map[t.source] || 0) + 1 })
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 10)
+  }, [allThreats])
+
+  const riskDist = useMemo(() => {
+    const counts = { critical: 0, high: 0, medium: 0, low: 0 }
+    allThreats.slice(0, 300).forEach(t => { counts[riskLevel(t.score)]++ })
+    return Object.entries(counts).map(([name, value]) => ({ name, value }))
+  }, [allThreats])
+
+  const timelineData = useMemo(() => {
+    const buckets = {}
+    const now = Date.now()
+    threatHistory.forEach(t => {
+      const key = t.bucket || new Date(t.t || now).toLocaleTimeString()
+      if (!buckets[key]) buckets[key] = { time: key, threats: 0, scans: 0 }
+      buckets[key].threats += t.count || 1
+      buckets[key].scans++
+    })
+    return Object.values(buckets).slice(-20)
+  }, [threatHistory])
+
+  const knowledgeGrowth = useMemo(() => {
+    const hist = k.history || []
+    return hist.slice(-30).map(h => ({
+      cycle: `#${h.cycle}`, total: h.cves + h.iocs + h.malware + h.urls,
+      cves: h.cves || 0, iocs: h.iocs || 0, urls: h.urls || 0,
+    }))
+  }, [k])
+
+  const ticker = lastEvent ? {
+    research: `RT SCAN: ${lastEvent.data.count} threats from ${Object.keys(lastEvent.data.sources || {}).length} sources`,
+    deep_research: `DEEP SCAN #${lastEvent.data.cycle}: ${lastEvent.data.count} threats across ${Object.keys(lastEvent.data.sources || {}).length} sources`,
+    crawl: `CRAWL: ${lastEvent.data.count} pages, ${lastEvent.data.threat_pages || 0} threats`,
+    passive_scan: `PASSIVE: ${lastEvent.data.count} targets analyzed`,
+    train_complete: `TRAINED v${lastEvent.data.version}: ${lastEvent.data.samples} samples → ModelScope`,
+    train_status: 'TRAINING ON MODELScope CLOUD GPU...',
+    insights: (lastEvent.data.insights?.[0]?.message) || 'Research insights ready',
+    footprint: `FOOTPRINT: ${lastEvent.data.count} analyzed, ${lastEvent.data.malicious} malicious`,
+    notif: lastEvent.data.title,
+  }[lastEvent.event] : 'INITIALIZING...'
+
+  const totalRiskScore = useMemo(() => allThreats.slice(0, 300).reduce((sum, t) => sum + (t.score || 0), 0), [allThreats])
+  const highValueThreats = useMemo(() => allThreats.filter(t => (t.score || 0) >= 40).length, [allThreats])
+  const liveEntries = Object.entries(liveSources)
+
+  const latestThreats = useMemo(() => allThreats.slice(0, 10), [allThreats])
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <div>
-          <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0 }}>AURA Live Dashboard</h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 4 }}>
-            Passive research: #{rcycle} · Deep research: #{cycle} · {total.toLocaleString()} total threats collected · {totalKnowledge.toLocaleString()} knowledge items
-          </p>
+      <div className="soc-header">
+        <div className="soc-title">
+          <span className="soc-glitch">AURA</span>
+          <span className="soc-sub">CYBER THREAT INTELLIGENCE · AI-POWERED SOC</span>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <span className="status-dot online" /><span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Research: 3min · Deep: 2hr</span>
-        </div>
-      </div>
-
-      <div className="dashboard-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
-        <div className="stat-card"><div className="label">Total Threats</div><div className="value" style={{ color: 'var(--accent-cyan)', fontSize: 22 }}>{total.toLocaleString()}</div><div className="sub">All time</div></div>
-        <div className="stat-card"><div className="label">Knowledge Items</div><div className="value" style={{ color: 'var(--accent-purple)', fontSize: 22 }}>{totalKnowledge.toLocaleString()}</div><div className="sub">Unique learnings</div></div>
-        <div className="stat-card"><div className="label">CVEs</div><div className="value" style={{ color: 'var(--accent-red)', fontSize: 22 }}>{(k.unique_cves || 0).toLocaleString()}</div><div className="sub">Vulnerabilities</div></div>
-        <div className="stat-card"><div className="label">IOCs</div><div className="value" style={{ color: 'var(--accent-yellow)', fontSize: 22 }}>{(k.unique_iocs || 0).toLocaleString()}</div><div className="sub">Indicators</div></div>
-        <div className="stat-card"><div className="label">Model Versions</div><div className="value" style={{ color: 'var(--accent-green)', fontSize: 22 }}>{t.versions || 0}</div><div className="sub">On ModelScope Hub</div></div>
-      </div>
-
-      <div className="dashboard-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-        <div className="panel">
-          <h2>Research Sources Breakdown</h2>
-          {barData.length > 0 ? <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={barData}><CartesianGrid strokeDasharray="3 3" stroke="var(--border)" /><XAxis dataKey="name" stroke="var(--text-secondary)" fontSize={10} /><YAxis stroke="var(--text-secondary)" fontSize={11} /><Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }} /><Bar dataKey="value" fill="var(--accent-cyan)" radius={[4, 4, 0, 0]} /></BarChart>
-          </ResponsiveContainer> : <div className="loading"><div className="spinner" /> Researching internet...</div>}
-        </div>
-        <div className="panel">
-          <h2>Knowledge Accumulation</h2>
-          {totalKnowledge > 0 ? <table><tbody>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Unique CVEs</td><td style={{ color: 'var(--accent-red)', fontWeight: 600 }}>{(k.unique_cves || 0).toLocaleString()}</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Unique IOCs</td><td style={{ color: 'var(--accent-yellow)', fontWeight: 600 }}>{(k.unique_iocs || 0).toLocaleString()}</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Malware Families</td><td style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{(k.unique_malware || 0).toLocaleString()}</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Malicious URLs</td><td style={{ color: 'var(--accent-purple)', fontWeight: 600 }}>{(k.unique_urls || 0).toLocaleString()}</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Total Samples Processed</td><td style={{ fontWeight: 600 }}>{(k.total_samples || 0).toLocaleString()}</td></tr>
-          </tbody></table> : <div className="loading"><div className="spinner" /> Building knowledge base...</div>}
+        <div className="soc-status">
+          <span className={`soc-dot ${s.active ? '' : 'off'}`} />
+          <span className="soc-mode">{s.active ? 'LIVE 24/7' : 'STANDBY'}</span>
+          <span className="soc-cycles">RT:{s.rt_cycle||0} · DEEP:{s.deep_cycle||0}</span>
         </div>
       </div>
 
-      <div className="panel">
-        <h2>Live Threat Feed <span className="badge">{threats.length} entries · real-time</span></h2>
-        {threats.length > 0 ? <div className="threat-table"><table>
-          <thead><tr><th>#</th><th>Type</th><th>Source</th><th>Detail</th><th>Score</th></tr></thead>
-          <tbody>{threats.map((t, i) => (
-            <tr key={i}>
-              <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{i + 1}</td>
-              <td><span className={`tag tag-${t.type === 'cve' ? 'cve' : 'ioc'}`}>{t.type || '?'}</span></td>
-              <td style={{ fontSize: 11 }}>{t.source}</td>
-              <td style={{ maxWidth: 400, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.instruction?.slice(0, 100) || t.description?.slice(0, 100) || '-'}</td>
-              <td>{t.cvss_score || '-'}</td>
-            </tr>
-          ))}</tbody>
-        </table></div> : <div className="loading"><div className="spinner" /> Scanning internet...</div>}
+      <div className="soc-ticker">
+        <span className="ticker-label">LIVE</span>
+        <span className="ticker-text" key={ticker}>{ticker}</span>
+        <span className="soc-badge sec">{allThreats.length} threats</span>
       </div>
 
-      <div className="dashboard-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-        <div className="panel">
-          <h2>Model Versions <span className="badge">{models.length}</span></h2>
-          {models.length > 0 ? <table><thead><tr><th>Cycle</th><th>Version</th><th>Samples</th><th>Time</th></tr></thead>
-          <tbody>{models.slice(-8).reverse().map((m, i) => (
-            <tr key={i}><td>#{m.cycle}</td><td style={{ color: 'var(--accent-cyan)' }}>{m.version}</td><td>{m.samples}</td><td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{new Date(m.timestamp).toLocaleTimeString()}</td></tr>
-          ))}</tbody></table> : <div className="loading"><div className="spinner" /> No models yet</div>}
+      {aiAnalysis && (
+        <div className="ai-insight-panel">
+          <div className="ai-insight-header">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+            AI THREAT ANALYSIS · Cycle #{aiAnalysis.cycle} · {aiAnalysis.count} threats
+            <span className="soc-badge sec">{aiAnalysis.at}</span>
+          </div>
+          <div className="ai-insight-body">{aiAnalysis.insight}</div>
         </div>
-        <div className="panel">
-          <h2>System Status</h2>
-          <table><tbody>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Research Cycle</td><td>Every 3 minutes (passive)</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Deep Research</td><td>Every 2 hours (full internet)</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Data Sources</td><td>18 simultaneous feeds</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Training</td><td>ModelScope cloud (zero local GPU)</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Training Data</td><td>All CVEs + IOCs + Malware + URLs + Linux cmds</td></tr>
-            <tr><td style={{ color: 'var(--text-secondary)' }}>Dataset Format</td><td>Instruction-Response JSONL → ModelScope Hub</td></tr>
-          </tbody></table>
+      )}
+
+      {/* Live Threat Ticker */}
+      <div className="threat-ticker-wrap">
+        <div className="threat-ticker-inner">
+          {allThreats.slice(0, 20).map((t, i) => {
+            const risk = riskLevel(t.score)
+            return (
+              <span key={i} className="threat-ticker-item">
+                <span className={`threat-ticker-dot ${risk}`} />
+                <span className="soc-tag" style={{ fontSize: 8, padding: '0 4px' }}>{t.type?.slice(0, 6) || '?'}</span>
+                {t.instruction?.slice(0, 50) || t.url?.slice(0, 50) || t.ioc?.slice(0, 40) || t.response?.slice(0, 40) || '-'}
+              </span>
+            )
+          })}
         </div>
+      </div>
+
+      {/* Live Scraping Animation */}
+      <div className="scan-wave">
+        <div className="scan-wave-inner">
+          {liveEntries.slice(0, 16).map(([name, info], i) => (
+            <div key={name} className="scan-wave-bar" style={{ height: `${Math.min(100, (info.count || 1) * 5)}%`, opacity: info.fresh ? 1 : 0.4 }} title={`${name}: +${info.count}`} />
+          ))}
+          {liveEntries.length === 0 && <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>WAITING FOR SCRAPE DATA...</span>}
+        </div>
+      </div>
+
+      {liveEntries.length > 0 && (
+        <div className="soc-panel" style={{ marginBottom: 14 }}>
+          <div className="soc-panel-header">
+            THREAT INTELLIGENCE BUREAU — ACTIVE SCRAPING <span className="soc-badge">{liveEntries.length} sources</span>
+            <span className="soc-badge sec">{(s.total_scraped || 0).toLocaleString()} total</span>
+          </div>
+          <div className="scrape-animation">
+            {liveEntries.slice(0, 20).map(([name, info]) => {
+              const h = Math.min(100, (info.count || 1) * 8)
+              const level = info.count > 50 ? 'critical' : info.count > 20 ? 'high' : info.count > 5 ? 'medium' : 'low'
+              return (
+                <div key={name} className={`scrape-bar anim-${level}`} style={{ height: `${h}%`, opacity: info.fresh ? 1 : 0.5 }} title={`${name}: +${info.count}`}>
+                  <div style={{ fontSize: 6, textAlign: 'center', color: 'var(--text-secondary)', marginTop: 2 }}>{name.slice(0, 4)}</div>
+                </div>
+              )
+            })}
+          </div>
+          <div className="source-grid-live" style={{ marginTop: 4 }}>
+            {liveEntries.map(([name, info]) => (
+              <div key={name} className={`source-live-item ${info.fresh ? 'active' : ''}`}>
+                <span className="src-name">{name}</span>
+                <span className="src-count">+{info.count} · {info.scan_type}#{info.cycle}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="soc-stats">
+        <div className="soc-stat critical">
+          <div className="soc-stat-val">{(s.total_scraped || 0).toLocaleString()}</div>
+          <div className="soc-stat-lbl">THREATS SCRAPED</div>
+          <div className="soc-stat-sub">{s.last_scrape ? new Date(s.last_scrape).toLocaleTimeString() : '--'}</div>
+        </div>
+        <div className="soc-stat high">
+          <div className="soc-stat-val">{totalK.toLocaleString()}</div>
+          <div className="soc-stat-lbl">AI KNOWLEDGE ITEMS</div>
+          <div className="soc-stat-sub">CVE:{k.cves||0} IOC:{k.iocs||0} MAL:{k.malware||0} URL:{k.urls||0}</div>
+        </div>
+        <div className="soc-stat medium">
+          <div className="soc-stat-val">{highValueThreats}</div>
+          <div className="soc-stat-lbl">HIGH-VALUE THREATS</div>
+          <div className="soc-stat-sub">Risk score ≥ 40 · {totalRiskScore.toLocaleString()} total risk</div>
+        </div>
+        <div className="soc-stat low">
+          <div className="soc-stat-val">{(s.training?.total_samples || 0).toLocaleString()}</div>
+          <div className="soc-stat-lbl">TRAINED SAMPLES</div>
+          <div className="soc-stat-sub">{versions.length} versions · {s.training?.running ? 'TRAINING' : 'ModelScope'}</div>
+        </div>
+      </div>
+
+      <div className="charts-row">
+        <div className="chart-container">
+          <div className="chart-title">THREAT TIMELINE <span className="chart-badge">Last 5 min</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={timelineData.length > 0 ? timelineData : [{ time: '...', threats: 0, scans: 0 }]}>
+                <defs><linearGradient id="colorThreats" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/><stop offset="95%" stopColor="#ef4444" stopOpacity={0}/></linearGradient></defs>
+                <XAxis dataKey="time" tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <YAxis tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Area type="monotone" dataKey="threats" stroke="#ef4444" fill="url(#colorThreats)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="chart-container">
+          <div className="chart-title">THREAT TYPE DISTRIBUTION <span className="chart-badge">{typeDist.length} types</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={typeDist.slice(0, 8)} layout="vertical">
+                <XAxis type="number" tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <YAxis type="category" dataKey="name" tick={{ fontSize: 7, fill: '#94a3b8' }} width={65} />
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Bar dataKey="value" radius={[0, 3, 3, 0]}>
+                  {typeDist.slice(0, 8).map((entry, i) => <Cell key={i} fill={TYPE_COLORS[entry.name] || '#64748b'} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      <div className="charts-row">
+        <div className="chart-container">
+          <div className="chart-title">SOURCE BREAKDOWN <span className="chart-badge">{sourceDist.length} sources</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={sourceDist.slice(0, 6)} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={65} innerRadius={30}>
+                  {sourceDist.slice(0, 6).map((entry, i) => <Cell key={i} fill={['#06b6d4','#f59e0b','#8b5cf6','#ef4444','#10b981','#ec4899'][i]} />)}
+                </Pie>
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Legend wrapperStyle={{ fontSize: 8, color: '#94a3b8' }} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="chart-container">
+          <div className="chart-title">RISK SEVERITY <span className="chart-badge">{allThreats.length} threats</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={riskDist}>
+                <XAxis dataKey="name" tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                <YAxis tick={{ fontSize: 9, fill: '#94a3b8' }} />
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                  {riskDist.map((entry, i) => <Cell key={i} fill={COLORS[entry.name] || '#64748b'} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+
+      {knowledgeGrowth.length > 1 && (
+        <div className="chart-container" style={{ marginBottom: 14 }}>
+          <div className="chart-title">KNOWLEDGE GROWTH <span className="chart-badge">{knowledgeGrowth.length} cycles</span></div>
+          <div className="chart-wrap" style={{ height: 120 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={knowledgeGrowth}>
+                <defs><linearGradient id="knowGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/><stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/></linearGradient></defs>
+                <XAxis dataKey="cycle" tick={{ fontSize: 7, fill: '#94a3b8' }} />
+                <YAxis tick={{ fontSize: 7, fill: '#94a3b8' }} />
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Area type="monotone" dataKey="total" stroke="#8b5cf6" fill="url(#knowGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      <div className="filters-bar">
+        <span className="filter-label">Type</span>
+        <button className={`filter-btn ${filterType === 'all' ? 'active' : ''}`} onClick={() => setFilterType('all')}>All</button>
+        {uniqueTypes.slice(0, 8).map(t => (
+          <button key={t} className={`filter-btn ${filterType === t ? 'active' : ''}`} onClick={() => setFilterType(t)}>{t}</button>
+        ))}
+        <span className="filter-label" style={{ marginLeft: 8 }}>Risk</span>
+        {['all', 'critical', 'high', 'medium', 'low'].map(r => (
+          <button key={r} className={`filter-btn ${filterRisk === r ? 'active' : ''}`} onClick={() => setFilterRisk(r)}>{r.toUpperCase()}</button>
+        ))}
+        <span className="filter-label" style={{ marginLeft: 8 }}>View</span>
+        <button className={`filter-btn ${viewMode === 'cards' ? 'active' : ''}`} onClick={() => setViewMode('cards')}>Cards</button>
+        <button className={`filter-btn ${viewMode === 'table' ? 'active' : ''}`} onClick={() => setViewMode('table')}>Table</button>
+        <input className="filter-search" placeholder="Search threats, URLs, IOCs..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+      </div>
+
+      <div className="soc-grid">
+        <div className="soc-panel feed">
+          <div className="soc-panel-header">
+            {viewMode === 'cards' ? 'THREAT INTELLIGENCE CARDS' : 'THREAT TABLE'} <span className="soc-badge">{filteredThreats.length}</span>
+            <span className="soc-badge sec">RT 3S POLL</span>
+          </div>
+          {viewMode === 'cards' ? (
+            <div className="threat-grid">
+              {filteredThreats.slice(0, 60).map((t, i) => <ThreatCard key={`${t.t}-${i}`} t={t} onClick={onThreatClick} />)}
+              {filteredThreats.length === 0 && <div className="soc-empty">No threats match filters</div>}
+            </div>
+          ) : (
+            <div className="soc-feed">
+              <table className="soc-table">
+                <thead><tr><th style={{ width: 20 }}>#</th><th style={{ width: 48 }}>TYPE</th><th style={{ width: 40 }}>SRC</th><th>THREAT CONTENT / URL / DESCRIPTION</th><th style={{ width: 35 }}>RISK</th><th style={{ width: 55 }}>TIME</th></tr></thead>
+                <tbody>
+                  {filteredThreats.slice(0, 50).map((t, i) => (
+                    <tr key={`${t.t}-${i}`} className="soc-tr">
+                      <td className="soc-idx">{i + 1}</td>
+                      <td><span className={`soc-tag ${t.type === 'cve' ? 'cve' : ['ioc','botnet','malicious_ssl'].includes(t.type) ? 'ioc' : ['malicious_url','phishing_url','malware_url'].includes(t.type) ? 'url' : 'info'}`}>{t.type?.slice(0, 10)}</span></td>
+                      <td className="soc-src">{t.source?.slice(0, 8)}</td>
+                      <td className="soc-desc" title={t.instruction || t.response || t.url || t.ioc || t.description}>{t.instruction?.slice(0, 120) || t.response?.slice(0, 120) || t.url?.slice(0, 80) || t.ioc?.slice(0, 60) || t.description?.slice(0, 80) || '-'}</td>
+                      <td><span className={`soc-tag ${riskLevel(t.score) === 'critical' ? 'cve' : riskLevel(t.score) === 'high' ? 'ioc' : riskLevel(t.score) === 'medium' ? 'url' : 'info'}`}>{t.score || 0}</span></td>
+                      <td className="soc-time">{new Date(t.t || Date.now()).toLocaleTimeString()}</td>
+                    </tr>
+                  ))}
+                  {filteredThreats.length === 0 && <tr><td colSpan={6} className="soc-empty">No threats match current filters</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div className="soc-side">
+          <div className="soc-panel">
+            <div className="soc-panel-header">AI KNOWLEDGE BASE <span className="soc-badge">{s.train_cycle || 0} cycles</span></div>
+            <div className="soc-kgrid">
+              {[
+                { l: 'CVEs', v: (k.cves || 0).toLocaleString(), c: 'var(--accent-red)', p: totalK > 0 ? ((k.cves || 0) / totalK * 100).toFixed(1) : 0 },
+                { l: 'IOCs', v: (k.iocs || 0).toLocaleString(), c: 'var(--accent-yellow)', p: totalK > 0 ? ((k.iocs || 0) / totalK * 100).toFixed(1) : 0 },
+                { l: 'Malware', v: (k.malware || 0).toLocaleString(), c: 'var(--accent-cyan)', p: totalK > 0 ? ((k.malware || 0) / totalK * 100).toFixed(1) : 0 },
+                { l: 'URLs', v: (k.urls || 0).toLocaleString(), c: 'var(--accent-purple)', p: totalK > 0 ? ((k.urls || 0) / totalK * 100).toFixed(1) : 0 },
+              ].map((x, i) => (
+                <div key={i} className="soc-kitem">
+                  <div className="soc-klbl">{x.l}</div>
+                  <div className="soc-kval" style={{ color: x.c }}>{x.v}</div>
+                  <div className="soc-kbar"><div className="soc-kfill" style={{ width: `${x.p}%`, background: x.c }} /></div>
+                </div>
+              ))}
+              <div className="soc-kitem total">
+                <div className="soc-klbl" style={{ fontWeight: 600 }}>TOTAL</div>
+                <div className="soc-kval" style={{ color: 'white' }}>{totalK.toLocaleString()}</div>
+                <div className="soc-kbar"><div className="soc-kfill" style={{ width: '100%', background: 'linear-gradient(90deg, var(--accent-red), var(--accent-purple))' }} /></div>
+              </div>
+            </div>
+            <div className="progress-track"><div className="progress-fill" style={{ width: `${Math.min(100, (totalK / 10000) * 100)}%` }} /></div>
+          </div>
+
+          {insights.length > 0 && (
+            <div className="soc-panel">
+              <div className="soc-panel-header">AI RESEARCH INSIGHTS</div>
+              {insights.slice(0, 5).map((ins, i) => (
+                <div key={i} className="soc-ver" style={{ fontSize: 10, flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+                    <span className={`soc-tag ${ins.type === 'high_confidence' ? 'cve' : ins.type === 'trending_up' ? 'ioc' : 'info'}`}>{ins.type}</span>
+                    <span style={{ color: 'var(--text-secondary)' }}>{ins.message}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="soc-panel">
+            <div className="soc-panel-header">LATEST THREATS <span className="soc-badge">{latestThreats.length}</span></div>
+            <div className="soc-versions">
+              {latestThreats.map((t, i) => (
+                <div key={i} className="soc-ver" style={{ fontSize: 10 }}>
+                  <span className={`soc-tag ${t.type === 'cve' ? 'cve' : ['ioc','botnet'].includes(t.type) ? 'ioc' : 'url'}`} style={{ marginRight: 6 }}>{t.type?.slice(0, 6)}</span>
+                  <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{t.instruction?.slice(0, 40) || t.url?.slice(0, 40) || t.ioc?.slice(0, 40) || '-'}</span>
+                  <span className="soc-ver-time">{new Date(t.t || Date.now()).toLocaleTimeString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="soc-panel">
+            <div className="soc-panel-header">MODEL SCOPE DATASETS <span className="soc-badge">{versions.length}</span></div>
+            <div className="soc-versions">
+              {versions.length > 0 ? [...versions].reverse().slice(0, 10).map((v, i) => (
+                <div key={i} className="soc-ver">
+                  <span className="soc-ver-id">#{v.cycle}</span>
+                  <span className="soc-ver-name">{v.version}</span>
+                  <span className="soc-ver-samples">{(v.samples || 0).toLocaleString()} samples</span>
+                  <span className="soc-ver-time">{new Date(v.t).toLocaleTimeString()}</span>
+                </div>
+              )) : <div className="soc-empty">First training on ModelScope cloud pending...</div>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="soc-panel" style={{ marginTop: 14 }}>
+        <div className="soc-panel-header">
+          REAL-TIME ACTIVITY STREAM <span className="soc-badge">{activity.length} events</span>
+          <span className="soc-badge sec">{s.active ? 'LIVE' : 'OFFLINE'}</span>
+        </div>
+        <div className="soc-activity">
+          <table className="soc-table">
+            <thead><tr><th style={{ width: 65 }}>EVENT</th><th style={{ width: 35 }}>COUNT</th><th>DETAILS</th><th style={{ width: 60 }}>TIME</th></tr></thead>
+            <tbody>
+              {activity.slice(0, 20).map((a, i) => {
+                const d = a.data
+                const detail = {
+                  research: `${d.count} threats, ${Object.keys(d.sources || {}).length} sources`,
+                  deep_research: `Deep #${d.cycle}: ${d.count} threats`,
+                  crawl: `${d.count} pages, ${d.threat_pages || 0} threats`,
+                  passive_scan: `${d.count} targets scanned`,
+                  train_complete: `v${d.version}: ${d.samples} samples → ModelScope`,
+                  train_status: `${d.samples} samples training...`,
+                  insights: (d.insights || []).slice(0, 2).map(x => x.message).join(' | ') || `${d.clusters} clusters`,
+                  footprint: `${d.count} footprints, ${d.malicious} malicious`,
+                  notif: d.title || '',
+                }[a.event] || ''
+                return (
+                  <tr key={i} className="soc-tr">
+                    <td><span className={`soc-tag ${a.event === 'deep_research' ? 'cve' : a.event === 'crawl' || a.event === 'passive_scan' ? 'info' : a.event === 'train_complete' ? 'url' : a.event === 'footprint' ? 'ioc' : 'url'}`}>{a.event}</span></td>
+                    <td style={{ fontWeight: 600 }}>{d.count || d.samples || '-'}</td>
+                    <td className="soc-desc">{detail}</td>
+                    <td className="soc-time">{new Date(a.t).toLocaleTimeString()}</td>
+                  </tr>
+                )
+              })}
+              {activity.length === 0 && <tr><td colSpan={4} className="soc-empty">Waiting for first scan...</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="soc-panel" style={{ marginTop: 14 }}>
+        <div className="soc-panel-header">ALL DATA SOURCES <span className="soc-badge">{sourceCount}</span><span className="soc-badge sec">100+ SOURCES</span></div>
+        <div className="soc-sources">
+          {(Object.entries(sources).length > 0 ? Object.entries(sources) : []).map(([id, name]) => (
+            <div key={id} className="soc-src-chip">
+              <span className="soc-src-id">{id}</span>
+              <span className="soc-src-name">{name}</span>
+              <span className="soc-src-count">{allThreats.filter(t => t.source === id).length}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Intelligence Agency Tracking */}
+      <AgencyTracker />
+    </div>
+  )
+}
+
+const AGENCY_LIST = [
+  { id: 'nsa', name: 'NSA', country: 'USA', color: '#ef4444', focus: 'Mass surveillance, cyber warfare' },
+  { id: 'mossad', name: 'Mossad', country: 'Israel', color: '#06b6d4', focus: 'Cyber espionage, zero-day ops' },
+  { id: 'gru', name: 'GRU', country: 'Russia', color: '#ec4899', focus: 'Destructive malware, disinfo' },
+  { id: 'msrc', name: 'MSS', country: 'China', color: '#f97316', focus: 'Supply chain attacks, IP theft' },
+  { id: 'gchq', name: 'GCHQ', country: 'UK', color: '#8b5cf6', focus: 'Sigint, fiber tapping' },
+  { id: 'raw', name: 'RAW', country: 'India', color: '#f59e0b', focus: 'Counter-terror, dark web' },
+  { id: 'isi', name: 'ISI', country: 'Pakistan', color: '#10b981', focus: 'APT ops, Android malware' },
+]
+
+function AgencyTracker() {
+  const [agencies, setAgencies] = useState([])
+  const [expanded, setExpanded] = useState(null)
+  useEffect(() => {
+    fetch('/api/agencies').then(r => r.json()).then(d => setAgencies(Object.entries(d.agencies || []))).catch(() => {})
+  }, [])
+  return (
+    <div className="soc-panel">
+      <div className="soc-panel-header">
+        INTELLIGENCE AGENCY TRACKING
+        <span className="soc-badge">{AGENCY_LIST.length} agencies</span>
+        <span className="soc-badge sec">PASSIVE OSINT</span>
+      </div>
+      <div className="soc-sources" style={{ flexDirection: 'column', gap: 4 }}>
+        {AGENCY_LIST.map(a => (
+          <div key={a.id} className="soc-src-chip" style={{ borderColor: a.color, cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch' }}
+            onClick={() => setExpanded(expanded === a.id ? null : a.id)}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+              <span className="soc-src-id" style={{ color: a.color }}>{a.id.toUpperCase()}</span>
+              <span style={{ fontSize: 10, fontWeight: 600 }}>{a.name}</span>
+              <span style={{ fontSize: 8, color: 'var(--text-secondary)' }}>{a.country}</span>
+              <span style={{ fontSize: 8, color: 'var(--text-secondary)', marginLeft: 'auto' }}>{a.focus}</span>
+            </div>
+            {expanded === a.id && agencies.filter(([k]) => k === a.id).map(([key, profile]) => (
+              <div key={key} style={{ marginTop: 6, padding: 6, background: 'var(--bg-primary)', borderRadius: 4, fontSize: 9 }}>
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                  <div><strong style={{ color: a.color }}>Known Ops:</strong> {profile.known_ops?.join(', ') || '—'}</div>
+                  <div><strong style={{ color: a.color }}>Tactics:</strong> {profile.tactics?.join(', ') || '—'}</div>
+                  <div><strong style={{ color: a.color }}>Targets:</strong> {profile.targets?.join(', ') || '—'}</div>
+                  <div><strong style={{ color: a.color }}>Tools:</strong> {profile.tools?.join(', ') || '—'}</div>
+                  <div><strong style={{ color: a.color }}>Last Seen:</strong> {profile.last_seen || '—'}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
       </div>
     </div>
   )

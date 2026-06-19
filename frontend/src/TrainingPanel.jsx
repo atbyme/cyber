@@ -1,123 +1,208 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
+
+const COLORS = ['#06b6d4','#8b5cf6','#f59e0b','#ef4444']
 
 export default function TrainingPanel({ status }) {
-  const [trainStatus, setTrainStatus] = useState({})
-  const [modelHistory, setModelHistory] = useState([])
-  const [knowledge, setKnowledge] = useState({})
-  const [starting, setStarting] = useState(false)
-  const [message, setMessage] = useState('')
+  const [data, setData] = useState({ versions: [], datasets: [] })
+  const [training, setTraining] = useState({})
+  const [knowledge, setKnowledge] = useState({ cves: 0, iocs: 0, malware: 0, urls: 0, history: [] })
+  const [busy, setBusy] = useState(false)
+  const [sampleHistory, setSampleHistory] = useState([])
 
-  useEffect(() => {
-    const f = () => {
-      fetch('/api/train/status').then(r => r.json()).then(setTrainStatus).catch(() => {})
-      fetch('/api/train/history').then(r => r.json()).then(d => setModelHistory(d.model_versions || [])).catch(() => {})
-      fetch('/api/knowledge').then(r => r.json()).then(setKnowledge).catch(() => {})
-    }
-    f()
-    const i = setInterval(f, 8000)
-    return () => clearInterval(i)
+  const fetchAll = useCallback(() => {
+    fetch('/api/train/status').then(r => r.json()).then(setTraining).catch(() => {})
+    fetch('/api/train/versions').then(r => r.json()).then(d => {
+      setData(d)
+      const versions = d.versions || []
+      setSampleHistory(prev => {
+        const pts = versions.filter(v => !prev.find(p => p.cycle === v.cycle)).map(v => ({ cycle: `#${v.cycle}`, samples: v.samples || 0, version: v.version }))
+        return [...prev, ...pts].slice(-40)
+      })
+    }).catch(() => {})
+    fetch('/api/knowledge').then(r => r.json()).then(setKnowledge).catch(() => {})
   }, [])
 
+  useEffect(() => {
+    fetchAll()
+    const i = setInterval(fetchAll, 3000)
+    return () => clearInterval(i)
+  }, [fetchAll])
+
   const startTraining = async () => {
-    setStarting(true); setMessage('')
-    try { const r = await fetch('/api/train/start', { method: 'POST' }); const d = await r.json(); setMessage(d.message) }
-    catch { setMessage('Failed') }
-    finally { setStarting(false) }
+    setBusy(true)
+    await fetch('/api/train/start', { method: 'POST' })
+    setTimeout(() => { setBusy(false); fetchAll() }, 3000)
   }
 
-  const ts = trainStatus
-  const models = modelHistory
+  const versions = data.versions || []
+  const t = training
   const k = knowledge
-  const totalSamples = k.total_samples || 0
-  const isRunning = ts.running || status.training?.running
-  const verCount = ts.versions || models.length
+  const totalK = (k.cves || 0) + (k.iocs || 0) + (k.malware || 0) + (k.urls || 0)
+  const totalSamples = t.samples || 0
 
-  const resourceTotal = (k.unique_cves || 0) + (k.unique_iocs || 0) + (k.unique_malware || 0) + (k.unique_urls || 0)
+  const knowledgeTypes = useMemo(() => [
+    { name: 'CVEs', value: k.cves || 0 }, { name: 'IOCs', value: k.iocs || 0 },
+    { name: 'Malware', value: k.malware || 0 }, { name: 'URLs', value: k.urls || 0 },
+  ], [k])
+
+  const latestVersion = versions.length > 0 ? versions[versions.length - 1] : null
 
   return (
     <div>
-      <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4 }}>AI Training Pipeline</h1>
-      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 24 }}>
-        Training on ALL internet resources · {verCount} model versions · ModelScope cloud GPU (zero local)
-      </p>
-
-      <div className="dashboard-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)' }}>
-        <div className="stat-card"><div className="label">Model Versions</div><div className="value" style={{ color: 'var(--accent-cyan)' }}>{verCount}</div><div className="sub">Pushed to ModelScope Hub</div></div>
-        <div className="stat-card"><div className="label">Training Samples</div><div className="value" style={{ color: 'var(--accent-purple)' }}>{(ts.total_samples || totalSamples).toLocaleString()}</div><div className="sub">Merged threat + Linux data</div></div>
-        <div className="stat-card"><div className="label">Status</div><div className="value" style={{ color: isRunning ? 'var(--accent-yellow)' : 'var(--accent-green)', fontSize: 20 }}>{isRunning ? 'Training Cloud' : 'Ready'}</div><div className="sub">{ts.last_trained ? new Date(ts.last_trained).toLocaleString() : 'Awaiting data'}</div></div>
-        <div className="stat-card"><div className="label">Cloud Platform</div><div className="value" style={{ color: 'var(--accent-cyan)', fontSize: 18 }}>ModelScope</div><div className="sub">MS-SWIFT · Zero local GPU</div></div>
+      <div className="terminal-bar">
+        <span className="glitch">AI TRAINING & MODEL MANAGEMENT — MODELScope CLOUD</span>
+        <span className="blink">{t.running ? 'TRAINING ON GPU' : 'READY'}</span>
       </div>
 
-      <div className="panel">
-        <h2>All Training Resources</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: 12, fontSize: 13 }}>The AI trains on ALL collected internet intelligence — not limited to 1-2 sources:</p>
-        <div className="dashboard-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)', marginBottom: 0 }}>
-          <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg-hover)', borderRadius: 8 }}><div style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-red)' }}>{k.unique_cves || 0}</div><div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>CVEs</div></div>
-          <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg-hover)', borderRadius: 8 }}><div style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-yellow)' }}>{k.unique_iocs || 0}</div><div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>IOCs</div></div>
-          <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg-hover)', borderRadius: 8 }}><div style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-cyan)' }}>{k.unique_malware || 0}</div><div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Malware</div></div>
-          <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg-hover)', borderRadius: 8 }}><div style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-purple)' }}>{k.unique_urls || 0}</div><div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>URLs</div></div>
-          <div style={{ textAlign: 'center', padding: 12, background: 'var(--bg-hover)', borderRadius: 8 }}><div style={{ fontSize: 24, fontWeight: 700, color: 'var(--accent-green)' }}>31</div><div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Linux Commands</div></div>
+      <div className="soc-stats">
+        <div className="soc-stat critical">
+          <div className="soc-stat-val">{totalSamples.toLocaleString()}</div>
+          <div className="soc-stat-lbl">TOTAL SAMPLES</div>
+          <div className="soc-stat-sub">{t.running ? 'Training...' : 'Trained'}</div>
+        </div>
+        <div className="soc-stat high">
+          <div className="soc-stat-val">{t.versions || versions.length || 0}</div>
+          <div className="soc-stat-lbl">MODEL VERSIONS</div>
+          <div className="soc-stat-sub">{t.last_trained ? new Date(t.last_trained).toLocaleDateString() : 'No versions'}</div>
+        </div>
+        <div className="soc-stat medium">
+          <div className="soc-stat-val">{totalK.toLocaleString()}</div>
+          <div className="soc-stat-lbl">KNOWLEDGE INPUT</div>
+          <div className="soc-stat-sub">Training data</div>
+        </div>
+        <div className="soc-stat low">
+          <div className="soc-stat-val">{t.datasets || data.datasets?.length || 0}</div>
+          <div className="soc-stat-lbl">DATASETS</div>
+          <div className="soc-stat-sub">ModelScope Hub</div>
         </div>
       </div>
 
-      <div className="panel">
-        <h2>Automated Training Pipeline</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: 13 }}>
-          Every research cycle automatically creates a dataset and dispatches to ModelScope cloud for training.
-        </p>
-        {isRunning && <div style={{ marginBottom: 16 }}><div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13, color: 'var(--text-secondary)' }}><span>Dispatching to ModelScope cloud...</span></div><div className="progress-bar"><div className="fill" style={{ width: '60%' }} /></div></div>}
-        <div style={{ display: 'flex', gap: 12 }}>
-          <button className="btn btn-primary" onClick={startTraining} disabled={isRunning || starting}>
-            {isRunning ? 'Training on Cloud...' : starting ? 'Starting...' : 'Manual Train Now'}
-          </button>
+      <div className="filters-bar">
+        <button className="btn btn-primary" onClick={startTraining} disabled={busy || t.running} style={{ fontSize: 11, padding: '6px 14px' }}>
+          {t.running ? '⟳ TRAINING ON MODELScope CLOUD...' : busy ? 'BUSY' : 'TRAIN NOW'}
+        </button>
+        <span className="modelscope-badge">ModelScope Cloud GPU · Qwen2.5-7B-Instruct</span>
+        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-secondary)' }}>
+          {t.running ? '● Training active' : '○ Idle'} · Auto-train daily at 03:00 UTC
+        </span>
+      </div>
+
+      <div className="charts-row">
+        <div className="chart-container">
+          <div className="chart-title">SAMPLE GROWTH <span className="chart-badge">{sampleHistory.length} versions</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={sampleHistory.length > 0 ? sampleHistory : [{ cycle: '#0', samples: 0 }]}>
+                <defs><linearGradient id="trainGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/><stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/></linearGradient></defs>
+                <XAxis dataKey="cycle" tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <YAxis tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Area type="monotone" dataKey="samples" stroke="#8b5cf6" fill="url(#trainGrad)" strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
         </div>
-        {message && <p style={{ color: 'var(--accent-green)', marginTop: 12, fontSize: 14 }}>{message}</p>}
+        <div className="chart-container">
+          <div className="chart-title">KNOWLEDGE DISTRIBUTION <span className="chart-badge">{totalK.toLocaleString()} total</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={knowledgeTypes}>
+                <XAxis dataKey="name" tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <YAxis tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                <Bar dataKey="value" radius={[3, 3, 0, 0]}>
+                  {knowledgeTypes.map((e, i) => <Cell key={i} fill={COLORS[i]} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
       </div>
 
-      {models.length > 0 && <div className="panel">
-        <h2>Model Version History <span className="badge">{models.length} versions</span></h2>
-        <div className="threat-table"><table>
-          <thead><tr><th>Cycle</th><th>Hub Model ID</th><th>Version</th><th>Samples</th><th>Time</th></tr></thead>
-          <tbody>{models.slice().reverse().map((m, i) => (
-            <tr key={i}>
-              <td style={{ color: 'var(--accent-cyan)' }}>#{m.cycle}</td>
-              <td style={{ fontSize: 11 }}>{m.hub_id}</td>
-              <td><span className="tag tag-cve">{m.version}</span></td>
-              <td>{m.samples}</td>
-              <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{new Date(m.timestamp).toLocaleString()}</td>
-            </tr>
-          ))}</tbody>
-        </table></div>
-      </div>}
-
-      <div className="panel">
-        <h2>Full Training Pipeline</h2>
-        <ol style={{ color: 'var(--text-secondary)', lineHeight: 2.4, fontSize: 14, paddingLeft: 20 }}>
-          <li><strong style={{ color: 'var(--accent-cyan)' }}>[PASSIVE] Real-time Research</strong> — Lightweight scan every 3min (ThreatFox, URLhaus, PhishTank, Feodo, SSLBL)</li>
-          <li><strong style={{ color: 'var(--accent-cyan)' }}>[DEEP] Full Internet Scan</strong> — Every 2 hours, all 18 sources including NVD, AlienVault, CISA KEV, crt.sh, MalwareBazaar</li>
-          <li><strong style={{ color: 'var(--accent-cyan)' }}>[FILTER] Clean & Dedup</strong> — Remove noise, format as instruction-response pairs</li>
-          <li><strong style={{ color: 'var(--accent-cyan)' }}>[MERGE] All Resources</strong> — CVEs + IOCs + Malware + URLs + Linux commands (31) + threat pulses</li>
-          <li><strong style={{ color: 'var(--accent-green)' }}>[CLOUD] Train on ModelScope</strong> — <strong>Zero local GPU</strong>, runs entirely on ModelScope cloud infrastructure</li>
-          <li><strong style={{ color: 'var(--accent-green)' }}>[HUB] Push to ModelScope</strong> — Dataset + model saved as <code>aura-cyber/&lt;model&gt;-finetuned:v{models.length + 1}</code></li>
-          <li><strong style={{ color: 'var(--accent-cyan)' }}>[LOOP] Continuous</strong> — Never-ending: research → learn → train → improve → repeat</li>
-        </ol>
+      <div className="split-row">
+        <div className="soc-panel half">
+          <div className="soc-panel-header">MODEL VERSIONS <span className="soc-badge">{versions.length}</span></div>
+          <div className="scroll-200">
+            {versions.length > 0 ? (
+              <table className="soc-table">
+                <thead><tr><th>Cycle</th><th>Version</th><th>Samples</th><th>Hub</th><th>Time</th></tr></thead>
+                <tbody>
+                  {[...versions].reverse().slice(0, 20).map((v, i) => (
+                    <tr key={i} className="soc-tr">
+                      <td className="soc-idx">#{v.cycle}</td>
+                      <td style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{v.version}</td>
+                      <td style={{ fontWeight: 600 }}>{(v.samples || 0).toLocaleString()}</td>
+                      <td style={{ fontSize: 9, color: 'var(--accent-green)' }}>{v.hub_status || 'pushed'}</td>
+                      <td className="soc-time">{new Date(v.t).toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : <div className="soc-empty">No versions yet — auto-training daily at 03:00 UTC</div>}
+          </div>
+        </div>
+        <div className="soc-panel half">
+          <div className="soc-panel-header">TRAINING RESOURCES</div>
+          <table className="soc-table">
+            <thead><tr><th>Resource</th><th>Details</th></tr></thead>
+            <tbody>
+              <tr className="soc-tr"><td style={{ color: 'var(--text-secondary)' }}>Base Model</td><td style={{ fontWeight: 600, color: 'var(--accent-cyan)' }}>Qwen2.5-7B-Instruct</td></tr>
+              <tr className="soc-tr"><td style={{ color: 'var(--text-secondary)' }}>Platform</td><td style={{ fontWeight: 600, color: 'var(--accent-purple)' }}>ModelScope Cloud GPU</td></tr>
+              <tr className="soc-tr"><td style={{ color: 'var(--text-secondary)' }}>Framework</td><td style={{ fontWeight: 600, color: 'var(--accent-yellow)' }}>MS-SWIFT</td></tr>
+              <tr className="soc-tr"><td style={{ color: 'var(--text-secondary)' }}>Schedule</td><td style={{ fontWeight: 600 }}>Daily at 03:00 UTC</td></tr>
+              <tr className="soc-tr"><td style={{ color: 'var(--text-secondary)' }}>Pipeline</td><td style={{ fontWeight: 600 }}>Scrape → Clean → Format → Merge → Push → Train</td></tr>
+              <tr className="soc-tr"><td style={{ color: 'var(--text-secondary)' }}>Data Sources</td><td style={{ fontWeight: 600 }}>19 threat sources + 99 Linux commands</td></tr>
+            </tbody>
+          </table>
+          <div style={{ marginTop: 10 }}>
+            <div className="soc-panel-header" style={{ fontSize: 10, borderBottom: 'none', paddingBottom: 0 }}>PIPELINE</div>
+            <div className="soc-sources" style={{ marginTop: 4 }}>
+              {[
+                { label: 'SCRAPE', done: true, sub: '19 sources' },
+                { label: 'CLEAN', done: true, sub: 'Filter' },
+                { label: 'FORMAT', done: true, sub: 'Instruct' },
+                { label: 'MERGE', done: true, sub: '+ Linux' },
+                { label: 'PUSH', done: !!latestVersion, sub: 'Hub' },
+                { label: 'TRAIN', done: !t.running, sub: t.running ? 'Running' : 'Ready' },
+              ].map((p, i) => (
+                <div key={i} className="soc-src-chip" style={p.done ? { borderColor: 'var(--accent-green)', background: 'rgba(16,185,129,0.08)' } : {}}>
+                  <span style={{ fontSize: 9, fontWeight: 600 }}>{p.done ? '✓' : '⟳'}</span>
+                  <span style={{ fontSize: 9, fontWeight: 600 }}>{p.label}</span>
+                  <span style={{ fontSize: 8, color: 'var(--text-secondary)' }}>{p.sub}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="panel">
-        <h2>Cloud Training Command (ModelScope)</h2>
-        <pre>{`# Run on ModelScope free cloud GPU:
-pip install ms-swift -U
+      {t.running && (
+        <div className="soc-panel" style={{ marginTop: 14, borderColor: 'var(--accent-yellow)' }}>
+          <div className="soc-panel-header" style={{ color: 'var(--accent-yellow)' }}>⟳ TRAINING ON MODELScope CLOUD GPU</div>
+          <div className="progress-track" style={{ height: 6, marginBottom: 6 }}>
+            <div className="progress-fill" style={{ width: '65%', background: 'linear-gradient(90deg, var(--accent-yellow), var(--accent-red))' }} />
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-secondary)' }}>
+            {totalSamples.toLocaleString()} samples → Qwen2.5-7B-Instruct via MS-SWIFT on ModelScope cloud GPU
+          </div>
+        </div>
+      )}
 
-# Train with latest dataset:
-swift train --config /path/to/swift_config.yaml
-
-# Push to Hub:
-swift export --ckpt_dir output \\
-  --push_to_hub true \\
-  --hub_model_id aura-cyber/<model>-finetuned
-
-# Each cycle auto-creates: aura-cyber/<model>-finetuned:v1, v2, v3...`}</pre>
-      </div>
+      {versions.length > 0 && (
+        <div className="soc-panel" style={{ marginTop: 14 }}>
+          <div className="soc-panel-header">MODELScope HUB DATASETS <span className="soc-badge">{versions.length}</span></div>
+          <div className="soc-sources">
+            {[...versions].reverse().slice(0, 15).map((v, i) => (
+              <div key={i} className="soc-src-chip" style={{ borderColor: 'rgba(139,92,246,0.3)' }}>
+                <span className="soc-src-id">{v.version}</span>
+                <span style={{ fontSize: 9, color: 'var(--text-secondary)' }}>{(v.samples || 0).toLocaleString()} samples</span>
+                <span style={{ fontSize: 8, color: 'var(--accent-green)' }}>{v.hub_status || 'pushed'}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
