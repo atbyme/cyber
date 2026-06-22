@@ -6,119 +6,108 @@ import TrainingPanel from './TrainingPanel'
 import FootprintPanel from './FootprintPanel'
 import CompanyIntelPanel from './CompanyIntelPanel'
 import AgencyPanel from './AgencyPanel'
+import MalwarePanel from './MalwarePanel'
+import TorPanel from './TorPanel'
+import DarkWatchPanel from './DarkWatchPanel'
+import WorldTrackerPanel from './WorldTrackerPanel'
+import DailyReportPanel from './DailyReportPanel'
 import ThreatDetailModal from './ThreatDetailModal'
 
-const AGENCY_COLORS = { 'isi': '#10b981', 'mossad': '#06b6d4', 'raw': '#f59e0b', 'nsa': '#ef4444', 'gchq': '#8b5cf6', 'gru': '#ec4899', 'msrc': '#f97316' }
+const AGENCY_MAP_POS = { isi: {x:68,y:26}, mossad: {x:53,y:24}, raw: {x:70,y:28}, nsa: {x:14,y:12}, gchq: {x:46,y:13}, gru: {x:60,y:12}, msrc: {x:74,y:20}, cia: {x:16,y:14}, mi6: {x:44,y:15}, dgse: {x:48,y:17}, bnd: {x:50,y:14}, fsb: {x:62,y:11}, asis: {x:82,y:44}, csis: {x:12,y:8} }
+const REGION_POS = [
+  {x:10,y:14,l:'North America'},{x:18,y:36,l:'South America'},{x:44,y:12,l:'Europe'},
+  {x:46,y:30,l:'Africa'},{x:60,y:10,l:'Russia'},{x:54,y:22,l:'Middle East'},
+  {x:66,y:24,l:'Asia'},{x:74,y:18,l:'China'},{x:70,y:36,l:'SE Asia'},{x:82,y:46,l:'Australia'},
+]
 
-function GlobalMap({ onThreatClick }) {
-  const [events, setEvents] = useState([])
+function GlobalMap() {
+  const [mapData, setMapData] = useState([])
+  const [agencyAct, setAgencyAct] = useState({})
   const [agencies, setAgencies] = useState([])
-  const [popupInfo, setPopupInfo] = useState(null)
+  const [popup, setPopup] = useState(null)
+  const [threatCount, setThreatCount] = useState(0)
 
-  useEffect(() => {
-    fetch('/api/agencies').then(r => r.json()).then(d => setAgencies(Object.entries(d.agencies || {}))).catch(() => {})
+  const load = useCallback(async () => {
+    try {
+      const [mapR, agActR, agR] = await Promise.all([
+        fetch('/api/threats/map').then(r=>r.json()),
+        fetch('/api/agencies/activity').then(r=>r.json()),
+        fetch('/api/agencies').then(r=>r.json()),
+      ])
+      setMapData(mapR.map || [])
+      setThreatCount(mapR.total_threats_mapped || 0)
+      setAgencyAct(agActR.agencies || {})
+      setAgencies(Object.entries(agR.agencies || {}))
+    } catch {}
   }, [])
 
-  useEffect(() => {
-    const gen = () => {
-      const list = []
-      const positions = [
-        { x: 15, y: 22, label: 'NA' }, { x: 28, y: 50, label: 'SA' },
-        { x: 48, y: 18, label: 'EU' }, { x: 50, y: 45, label: 'AF' },
-        { x: 62, y: 15, label: 'RU' }, { x: 54, y: 30, label: 'ME' },
-        { x: 65, y: 32, label: 'AS' }, { x: 76, y: 22, label: 'CN' },
-        { x: 72, y: 42, label: 'SEA' }, { x: 84, y: 55, label: 'AU' },
-      ]
-      for (let i = 0; i < 8; i++) {
-        const p = positions[i % positions.length]
-        list.push({
-          id: i, x: p.x + (Math.random() - 0.5) * 4, y: p.y + (Math.random() - 0.5) * 4,
-          sev: Math.random() > 0.6 ? '#ef4444' : Math.random() > 0.3 ? '#f59e0b' : '#06b6d4',
-          sz: 1.5 + Math.random() * 2.5, label: p.label,
-          name: ['DDoS', 'Ransomware', 'Phishing', 'APT', 'Malware', 'Zero-Day', 'Botnet', 'Data Breach'][Math.floor(Math.random() * 8)],
-          desc: `${['DDoS', 'Ransomware', 'Phishing', 'APT', 'Malware', 'Zero-Day', 'Botnet', 'Data Breach'][Math.floor(Math.random() * 8)]} attack detected in ${p.label} region — ${Math.random() > 0.5 ? 'Active' : 'Probable'} threat level ${Math.random() > 0.6 ? 'CRITICAL' : Math.random() > 0.3 ? 'HIGH' : 'MEDIUM'}`,
-        })
-      }
-      setEvents(list)
-    }
-    gen()
-    const i = setInterval(gen, 5000)
-    return () => clearInterval(i)
-  }, [])
+  useEffect(() => { load(); const i = setInterval(load, 10000); return () => clearInterval(i) }, [load])
+
+  const maxCount = Math.max(1, ...mapData.map(m => m.count))
+  const sevFromPct = p => p > 20 ? '#ef4444' : p > 10 ? '#f59e0b' : p > 5 ? '#06b6d4' : '#8b5cf6'
+
+  const cntToReg = mapData.reduce((a, c) => {
+    const region = REGION_POS.find(r => {
+      const dx = r.x - (c.lng+180)/3.6; const dy = r.y - (90-c.lat)/1.8
+      return Math.sqrt(dx*dx+dy*dy) < 12
+    })
+    if (region) a[region.l] = (a[region.l]||0) + c.count
+    return a
+  }, {})
+
+  const events = REGION_POS.map((r,i) => {
+    const c = cntToReg[r.l] || Math.floor(threatCount / 20)
+    const sev = sevFromPct((c / Math.max(1,threatCount))*100)
+    return { id: i, x: r.x + (Math.random()-0.5)*2, y: r.y + (Math.random()-0.5)*2, sev, sz: Math.max(0.8, Math.min(3, c/10)), label: r.l, name: `Threats: ${c}` }
+  })
 
   return (
-    <div className="global-map-bar">
-      <svg viewBox="0 0 100 50" className="global-map-svg" style={{ width: 280, height: 42 }}>
-        {/* North America */}
-        <path d="M8,8 L16,6 L20,10 L22,16 L20,22 L16,28 L12,30 L8,28 L6,22 L5,16 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* South America */}
-        <path d="M16,32 L20,30 L24,34 L24,40 L22,46 L18,48 L15,44 L14,38 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* Europe */}
-        <path d="M42,10 L48,8 L52,10 L54,14 L52,18 L48,20 L44,18 L42,14 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* Africa */}
-        <path d="M44,22 L50,20 L54,24 L54,32 L52,38 L48,40 L44,36 L42,30 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* Russia */}
-        <path d="M54,6 L62,4 L68,6 L70,10 L68,16 L64,18 L58,18 L54,16 L52,12 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* Middle East */}
-        <path d="M52,20 L56,18 L60,20 L60,24 L56,26 L52,24 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* Asia */}
-        <path d="M62,22 L70,20 L74,24 L74,30 L70,34 L64,34 L60,30 L58,26 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* China */}
-        <path d="M72,18 L78,16 L82,20 L80,26 L76,28 L72,26 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* SE Asia */}
-        <path d="M68,34 L74,32 L78,36 L76,42 L72,44 L68,42 L66,38 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-        {/* Australia */}
-        <path d="M80,46 L86,44 L90,48 L88,52 L84,54 L80,52 Z" fill="none" stroke="#2d3a50" strokeWidth="0.3" opacity="0.6" />
-
-        {/* Attack event dots — clickable */}
+    <div className="global-map-bar" style={{position:'relative'}}>
+      <svg viewBox="0 0 100 50" className="global-map-svg" style={{width:300,height:45}}>
+        {REGION_POS.map(r => <path key={r.l} d="M0,0h100v50H0Z" fill="none" stroke="#2d3a50" strokeWidth="0.1" opacity="0.02"/>)}
         {events.map(d => (
-          <g key={d.id} style={{ cursor: 'pointer' }}
-            onClick={() => setPopupInfo({ title: `${d.name} — ${d.label}`, desc: d.desc, sev: d.sev, x: d.x * 2.8 + 20, y: 35 })}
-            onMouseEnter={() => setPopupInfo({ title: `${d.name} — ${d.label}`, desc: d.desc, sev: d.sev, x: d.x * 2.8 + 20, y: 35 })}
-            onMouseLeave={() => setTimeout(() => setPopupInfo(null), 2000)}>
-            <circle cx={d.x} cy={d.y} r={d.sz * 2} fill="none" stroke={d.sev} strokeWidth="0.4" opacity="0.2" className="map-pulse" />
-            <circle cx={d.x} cy={d.y} r={d.sz * 0.7} fill={d.sev} opacity="0.9" />
+          <g key={d.id} style={{cursor:'pointer'}}
+            onClick={() => setPopup({title:`${d.name} — ${d.label}`,desc:`${d.label} region: ${d.name} threats active`,sev:d.sev,x:d.x*3+10,y:38})}
+            onMouseEnter={() => setPopup({title:`${d.name} — ${d.label}`,desc:`${d.label} region: ${d.name} threats active`,sev:d.sev,x:d.x*3+10,y:38})}
+            onMouseLeave={() => setTimeout(() => setPopup(null),2000)}>
+            <circle cx={d.x} cy={d.y} r={d.sz*1.5} fill="none" stroke={d.sev} strokeWidth="0.3" opacity="0.15" className="map-pulse"/>
+            <circle cx={d.x} cy={d.y} r={d.sz*0.5} fill={d.sev} opacity="0.85"/>
           </g>
         ))}
-
-        {/* Agency dots — clickable */}
-        {agencies.slice(0, 7).map(([key, a], i) => {
-          const cx = [12,20,55,72,46,62,78][i]; const cy = [14,38,14,32,48,12,24][i]
+        {agencies.slice(0,14).map(([key,a]) => {
+          const pos = AGENCY_MAP_POS[key] || {x:30,y:30}
+          const act = agencyAct[key] || {}
+          const sz = Math.max(1.2, Math.min(3, (act.total_threats||0)/5))
           return (
-            <g key={key} style={{ cursor: 'pointer' }}
-              onClick={() => setPopupInfo({ title: `${key.toUpperCase()} — ${a.name}`, desc: `Country: ${a.country} | Focus: ${a.focus} | Status: ${a.active ? 'Active' : 'Dormant'} | Last seen: ${a.last_seen || 'Unknown'}`, sev: a.color || '#8b5cf6', x: cx * 2.8 + 20, y: 35 })}
-              onMouseEnter={() => setPopupInfo({ title: `${key.toUpperCase()} — ${a.name}`, desc: `Country: ${a.country} | Focus: ${a.focus}`, sev: a.color || '#8b5cf6', x: cx * 2.8 + 20, y: 35 })}
-              onMouseLeave={() => setTimeout(() => setPopupInfo(null), 2000)}>
-              <circle cx={cx} cy={cy} r="2.2" fill={a.color || '#8b5cf6'} opacity="0.8" />
-              <text x={cx} y={cy - 4} textAnchor="middle" fill={a.color || '#8b5cf6'} fontSize="2" opacity="0.8">{key.toUpperCase()}</text>
+            <g key={key} style={{cursor:'pointer'}}
+              onClick={() => setPopup({title:`${key.toUpperCase()} — ${a.name}`,desc:`Country: ${a.country} | Threats: ${act.total_threats||0} | Tools: ${(act.tools_detected||[]).slice(0,3).join(', ')}`,sev:a.color||'#8b5cf6',x:pos.x*3+10,y:38})}
+              onMouseEnter={() => setPopup({title:`${key.toUpperCase()} — ${a.name}`,desc:`Country: ${a.country} | Threats tracked: ${act.total_threats||0}`,sev:a.color||'#8b5cf6',x:pos.x*3+10,y:38})}
+              onMouseLeave={() => setTimeout(() => setPopup(null),2000)}>
+              <circle cx={pos.x} cy={pos.y} r={sz} fill={a.color||'#8b5cf6'} opacity="0.7"/>
+              <text x={pos.x} y={pos.y-sz-1} textAnchor="middle" fill={a.color||'#8b5cf6'} fontSize="1.8" opacity="0.9">{key.toUpperCase()}</text>
             </g>
           )
         })}
       </svg>
-
-      {/* Map popup tooltip */}
-      {popupInfo && (
-        <div style={{
-          position: 'absolute', left: popupInfo.x, top: popupInfo.y, zIndex: 100,
-          background: '#1a2332', border: `1px solid ${popupInfo.sev}`, borderRadius: 6,
-          padding: '4px 8px', fontSize: 9, maxWidth: 250, boxShadow: '0 4px 20px rgba(0,0,0,0.5)',
-        }}>
-          <div style={{ color: popupInfo.sev, fontWeight: 700, fontSize: 10, marginBottom: 2 }}>{popupInfo.title}</div>
-          <div style={{ color: 'var(--text-secondary)', lineHeight: 1.4 }}>{popupInfo.desc}</div>
+      {popup && (
+        <div style={{position:'absolute',left:popup.x-60,top:popup.y-30,zIndex:100,
+          background:'#1a2332',border:`1px solid ${popup.sev}`,borderRadius:6,
+          padding:'4px 8px',fontSize:9,maxWidth:260,boxShadow:'0 4px 20px rgba(0,0,0,0.5)'}}>
+          <div style={{color:popup.sev,fontWeight:700,fontSize:10,marginBottom:2}}>{popup.title}</div>
+          <div style={{color:'var(--text-secondary)',lineHeight:1.4}}>{popup.desc}</div>
         </div>
       )}
-
       <div className="global-map-info">
-        <span style={{ color: 'var(--accent-cyan)', fontSize: 9 }}>● {events.length} live events</span>
-        <span style={{ color: 'var(--text-secondary)', fontSize: 8 }}>Click any dot for intel</span>
+        <span style={{color:'var(--accent-cyan)',fontSize:9}}>● {mapData.length} countries, {threatCount} threats</span>
+        <span style={{color:'var(--text-secondary)',fontSize:8}}>{agencies.length} agencies tracked</span>
       </div>
       <div className="global-map-actions">
-        <button className="btn btn-primary" style={{ fontSize: 9, padding: '2px 8px' }}
-          onClick={() => fetch('/api/report/save', { method: 'POST' }).then(r => r.json()).then(d => alert(`Report saved!\n${d.path}\n${d.report.total_threats} threats`))}>
+        <button className="btn btn-primary" style={{fontSize:9,padding:'2px 8px'}}
+          onClick={()=>fetch('/api/report/save',{method:'POST'}).then(r=>r.json()).then(d=>alert(`Report saved!\n${d.path}`))}>
           SAVE REPORT
         </button>
-        <button className="btn btn-primary" style={{ fontSize: 9, padding: '2px 8px' }}
-          onClick={() => window.open('/api/threats/export', '_blank')}>
+        <button className="btn btn-primary" style={{fontSize:9,padding:'2px 8px'}}
+          onClick={()=>window.open('/api/threats/export','_blank')}>
           EXPORT
         </button>
       </div>
@@ -127,7 +116,7 @@ function GlobalMap({ onThreatClick }) {
 }
 
 export default function App() {
-  const [page, setPage] = useState(() => localStorage.getItem('aura_page') || 'dashboard')
+  const [page, setPage] = useState(() => localStorage.getItem('sys_page') || 'dashboard')
   const [status, setStatus] = useState({})
   const [connected, setConnected] = useState(false)
   const [notifications, setNotifications] = useState([])
@@ -136,11 +125,10 @@ export default function App() {
   const [feedData, setFeedData] = useState({})
   const [detailThreat, setDetailThreat] = useState(null)
   const ws = useRef(null)
-  const autoExportDone = useRef(localStorage.getItem('aura_export_today') === new Date().toDateString())
-
+  const autoExportDone = useRef(localStorage.getItem('sys_export_today') === new Date().toDateString())
   const connect = useCallback(() => {
     try {
-      const host = location.host.includes('5173') ? 'localhost:8000' : location.host
+      const host = import.meta.env.DEV ? 'localhost:8000' : location.host
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
       const s = new WebSocket(`${proto}//${host}/ws`)
       s.onopen = () => setConnected(true)
@@ -178,25 +166,24 @@ export default function App() {
     return () => { clearInterval(i); ws.current?.close() }
   }, [connect, loadFeed])
 
-  useEffect(() => { localStorage.setItem('aura_page', page) }, [page])
+  useEffect(() => { localStorage.setItem('sys_page', page) }, [page])
 
-  // Auto-save daily export
   useEffect(() => {
     if (!autoExportDone.current && feedData.threats?.length > 10) {
       autoExportDone.current = true
-      localStorage.setItem('aura_export_today', new Date().toDateString())
+      localStorage.setItem('sys_export_today', new Date().toDateString())
       try {
-        const existing = JSON.parse(localStorage.getItem('aura_threat_history') || '[]')
+        const existing = JSON.parse(localStorage.getItem('sys_threat_history') || '[]')
         const day = new Date().toDateString()
         if (!existing.some(e => e.day === day)) {
           existing.push({ day, count: feedData.threats.length, threats: feedData.threats.slice(0, 50), t: new Date().toISOString() })
-          localStorage.setItem('aura_threat_history', JSON.stringify(existing.slice(-365)))
+          localStorage.setItem('sys_threat_history', JSON.stringify(existing.slice(-365)))
         }
       } catch {}
       setTimeout(() => {
         const a = document.createElement('a')
         a.href = '/api/threats/export'
-        a.download = `aura_threats_${new Date().toISOString().slice(0,10)}.txt`
+        a.download = `threats_${new Date().toISOString().slice(0,10)}.txt`
         a.click()
       }, 5000)
     }
@@ -207,7 +194,7 @@ export default function App() {
     setNotifications([]); setUnread(0)
   }
 
-  const P = { dashboard: Dashboard, scraper: ScraperPanel, research: ResearchPanel, training: TrainingPanel, footprint: FootprintPanel, company: CompanyIntelPanel, agencies: AgencyPanel }[page]
+  const P = { dashboard: Dashboard, scraper: ScraperPanel, research: ResearchPanel, training: TrainingPanel, footprint: FootprintPanel, company: CompanyIntelPanel, agencies: AgencyPanel, malware: MalwarePanel, tor: TorPanel, darkwatch: DarkWatchPanel, world: WorldTrackerPanel, report: DailyReportPanel }[page]
 
   const s = status
   const totalScraped = (s.total_scraped || 0).toLocaleString()
@@ -217,18 +204,23 @@ export default function App() {
 
   const navItems = [
     { key: 'dashboard', label: 'Dashboard', icon: '◈' },
+    { key: 'world', label: 'World', icon: '🌐' },
+    { key: 'report', label: 'Report', icon: '📄' },
     { key: 'scraper', label: 'Scraper', icon: '⚡' },
     { key: 'research', label: 'Research', icon: '◎' },
     { key: 'training', label: 'Training', icon: '⟳' },
     { key: 'footprint', label: 'Footprint', icon: '☉' },
-    { key: 'company', label: 'Company Intel', icon: '◆' },
+    { key: 'company', label: 'Companies', icon: '◆' },
     { key: 'agencies', label: 'Agencies', icon: '●' },
+    { key: 'malware', label: 'Malware', icon: '☠' },
+    { key: 'tor', label: 'Tor Net', icon: '◉' },
+    { key: 'darkwatch', label: 'Dark Web', icon: '◆' },
   ]
 
   return (
     <div className="layout">
       <aside className="sidebar">
-        <div className="logo">AURA <span className="accent">AI</span></div>
+        <div className="logo">SYS<span className="accent">MON</span></div>
         <nav>
           {navItems.map(({ key, label, icon }) => (
             <button key={key} className={`nav-btn ${page === key ? 'active' : ''}`} onClick={() => setPage(key)}>

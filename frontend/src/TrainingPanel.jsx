@@ -3,15 +3,16 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContai
 
 const COLORS = ['#06b6d4','#8b5cf6','#f59e0b','#ef4444']
 
-export default function TrainingPanel({ status }) {
+export default function TrainingPanel() {
   const [data, setData] = useState({ versions: [], datasets: [] })
   const [training, setTraining] = useState({})
   const [knowledge, setKnowledge] = useState({ cves: 0, iocs: 0, malware: 0, urls: 0, history: [] })
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
   const [sampleHistory, setSampleHistory] = useState([])
 
   const fetchAll = useCallback(() => {
-    fetch('/api/train/status').then(r => r.json()).then(setTraining).catch(() => {})
+    fetch('/api/train/status').then(r => r.json()).then(setTraining).catch(() => { setError('Failed to load training status') })
     fetch('/api/train/versions').then(r => r.json()).then(d => {
       setData(d)
       const versions = d.versions || []
@@ -50,6 +51,7 @@ export default function TrainingPanel({ status }) {
 
   return (
     <div>
+      {error && <div className="explain-bar" style={{borderColor:'var(--accent-yellow)'}}><span className="explain-icon">⚠</span><div style={{color:'var(--accent-yellow)'}}>{error}</div></div>}
       <div className="terminal-bar">
         <span className="glitch">AI TRAINING & MODEL MANAGEMENT — MODELScope CLOUD</span>
         <span className="blink">{t.running ? 'TRAINING ON GPU' : 'READY'}</span>

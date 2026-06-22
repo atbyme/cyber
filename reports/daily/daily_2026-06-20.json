@@ -1,0 +1,52 @@
+{
+  "date": "2026-06-20",
+  "generated_at": "2026-06-20T10:18:57.816117+00:00",
+  "summary": {
+    "total_threats_collected": 500,
+    "total_all_time": 2194,
+    "rt_cycles": 6,
+    "deep_cycles": 1,
+    "research_cycles": 1,
+    "train_cycles": 1,
+    "unique_sources": 2,
+    "countries_mapped": 1
+  },
+  "data_quality": {
+    "verified_cross_source": 0,
+    "verified_pct": 0.0,
+    "high_confidence": 0,
+    "avg_confidence": 54.6,
+    "total_knowledge_items": 63434
+  },
+  "threat_breakdown": {
+    "by_type": [
+      {
+        "type": "unknown",
+        "count": 500
+      }
+    ],
+    "by_source": [
+      {
+        "source": "spamhaus",
+        "count": 298
+      },
+      {
+        "source": "emerging_threats",
+        "count": 202
+      }
+    ],
+    "by_continent": [
+      {
+        "continent": "NA",
+        "count": 500
+      }
+    ]
+  },
+  "indicators": {
+    "sample_iocs": [],
+    "sample_urls": [],
+    "total_unique_iocs": 0,
+    "total_unique_urls": 0
+  },
+  "top_ips": []
+}

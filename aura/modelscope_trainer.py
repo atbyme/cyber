@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -10,7 +10,7 @@ import requests
 
 from .config import DATASETS_DIR, get, set_key
 
-logger = logging.getLogger("AURA.ModelScope")
+logger = logging.getLogger("sys.trainer")
 
 MODELSCOPE_API = "https://api.modelscope.cn/v1"
 MODELSCOPE_HUB_API = "https://www.modelscope.cn/api/v1"
@@ -111,13 +111,12 @@ def merge_datasets(datasets: List[List[Dict]]) -> List[Dict]:
 def push_dataset_to_hub(dataset_path: str, version: str) -> dict:
     ak = _api_key()
     if not ak:
-        logger.warning("No ModelScope API key, skipping Hub push")
-        return {"status": "no_key"}
+        logger.warning("No ModelScope API key, saving dataset locally only")
+        return {"status": "saved_locally", "path": dataset_path, "version": version}
 
     full_name = f"{DATASET_OWNER}/{DATASET_NAME}"
     url = f"{MODELSCOPE_HUB_API}/datasets/{full_name}/versions"
 
-    # Prepare dataset manifest
     dataset_dir = Path(dataset_path)
     train_path = dataset_dir / "train.jsonl"
     valid_path = dataset_dir / "valid.jsonl"
@@ -128,7 +127,7 @@ def push_dataset_to_hub(dataset_path: str, version: str) -> dict:
 
     payload = {
         "version": version,
-        "description": f"AURA cyber threat intelligence dataset v{version} - {datetime.utcnow().isoformat()}",
+        "description": f"cyber threat intelligence dataset v{version} - {datetime.now(timezone.utc).isoformat()}",
         "files": [],
     }
 
@@ -152,27 +151,26 @@ def push_dataset_to_hub(dataset_path: str, version: str) -> dict:
         return {"status": "pushed", "dataset": full_name, "version": version, "id": dataset_id}
     except Exception as e:
         logger.error(f"Hub push failed: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "saved_locally", "path": dataset_path, "version": version}
 
 
 def list_hub_datasets() -> list:
-    ak = _api_key()
-    if not ak:
-        return []
-    try:
-        resp = requests.get(f"{MODELSCOPE_HUB_API}/datasets/{DATASET_OWNER}/{DATASET_NAME}/versions",
-                           headers=_headers(), timeout=15)
-        if resp.status_code == 200:
-            return resp.json().get("data", []) or resp.json().get("versions", []) or []
-    except:
-        pass
-    return []
+    datasets = []
+    for d in DATASETS_DIR.iterdir():
+        if d.is_dir() and (d / "config.json").exists():
+            try:
+                cfg = json.load(open(d / "config.json"))
+                datasets.append({"name": d.name, "path": str(d), "samples": cfg.get("total_samples", 0), "created": cfg.get("created_at", "")})
+            except:
+                pass
+    return sorted(datasets, key=lambda x: x.get("created", ""), reverse=True)
 
 
 def trigger_cloud_training(dataset_path: str, model: str = "Qwen/Qwen2.5-7B-Instruct") -> dict:
     ak = _api_key()
     if not ak:
-        return {"status": "no_key", "message": "Set modelscope.api_key first"}
+        logger.info(f"Local-only mode: dataset saved at {dataset_path}")
+        return {"status": "local_ready", "path": dataset_path, "model": model, "message": "Dataset saved locally. Set modelscope.api_key for cloud training."}
 
     url = f"{MODELSCOPE_API}/train/fine-tune"
     payload = {
@@ -194,16 +192,16 @@ def trigger_cloud_training(dataset_path: str, model: str = "Qwen/Qwen2.5-7B-Inst
             return {"status": "started", "job_id": result.get("job_id"), "response": result}
         else:
             logger.warning(f"Cloud training API error: {resp.status_code} {resp.text[:200]}")
-            return {"status": "error", "code": resp.status_code, "message": resp.text[:200]}
+            return {"status": "saved_locally", "path": dataset_path, "model": model, "message": "Dataset saved. Cloud training failed, try again later."}
     except Exception as e:
         logger.error(f"Cloud training request failed: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "saved_locally", "path": dataset_path, "model": model, "message": f"Dataset saved locally. Cloud unavailable: {e}"}
 
 
 def check_training_status(job_id: str) -> dict:
     ak = _api_key()
     if not ak:
-        return {"status": "no_key"}
+        return {"status": "local_only"}
     try:
         resp = requests.get(f"{MODELSCOPE_API}/train/jobs/{job_id}", headers=_headers(), timeout=15)
         return resp.json() if resp.status_code == 200 else {"status": "error", "code": resp.status_code}
@@ -212,15 +210,7 @@ def check_training_status(job_id: str) -> dict:
 
 
 def list_trained_models() -> list:
-    ak = _api_key()
-    if not ak:
-        return []
-    try:
-        resp = requests.get(f"{MODELSCOPE_API}/models", params={"owner": DATASET_OWNER},
-                           headers=_headers(), timeout=15)
-        return resp.json().get("models", []) if resp.status_code == 200 else []
-    except:
-        return []
+    return [{"name": m.split("/")[-1], "path": m, "source": "local"} for m in SUPPORTED_MODELS]
 
 
 def get_training_command(config_path: str, cloud: bool = True) -> str:

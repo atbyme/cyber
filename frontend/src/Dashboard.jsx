@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
-const WS_HOST = location.host.includes('5173') ? 'localhost:8000' : location.host
+// OpSec: no hostname leak — use relative protocol
 const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:'
 
 const COLORS = { critical: '#ef4444', high: '#f59e0b', medium: '#06b6d4', low: '#8b5cf6' }
-const TYPE_COLORS = { cve: '#ef4444', ioc: '#f59e0b', botnet: '#f97316', malicious_ssl: '#ec4899', malicious_url: '#8b5cf6', phishing_url: '#a855f7', malware_url: '#d946ef', exploit: '#ef4444', cert: '#06b6d4', pulse: '#14b8a6', crawl_result: '#64748b' }
+const TYPE_COLORS = { cve: '#ef4444', ioc: '#f59e0b', botnet: '#f97316', malicious_ssl: '#ec4899', malicious_url: '#8b5cf6', phishing_url: '#a855f7', malware_url: '#d946ef', exploit: '#ef4444', cert: '#06b6d4', pulse: '#14b8a6', crawl_result: '#64748b', social_media: '#f59e0b', research_paper: '#8b5cf6' }
 
 function riskLevel(score) {
   if (!score || score < 10) return 'low'
@@ -33,6 +33,136 @@ function ThreatCard({ t, onClick }) {
         {t.cvss_score && <span>CVSS: {t.cvss_score}</span>}
       </div>
     </div>
+  )
+}
+
+function SocialFeed() {
+  const [feed, setFeed] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [scraperStatus, setScraperStatus] = useState(null)
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [tR, sR] = await Promise.all([
+          fetch('/api/threats?limit=300').then(r=>r.json()),
+          fetch('/api/scrapers/status').then(r=>r.json()).catch(()=>null),
+        ])
+        const threats = Array.isArray(tR) ? tR : []
+        const social = threats.filter(t => t.source === 'reddit_cyber' || t.source === 'hackernews' || t.source === 'arxiv_cyber' || t.source === 'bleepingcomputer' || t.source === 'thehackernews')
+        setFeed(social.length > 0 ? social.slice(0, 30) : threats.slice(0, 30))
+        setScraperStatus(sR)
+      } catch {}
+      setLoading(false)
+    }
+    load()
+    const i = setInterval(load, 15000)
+    return () => clearInterval(i)
+  }, [])
+  if (loading) return <div className="soc-empty">Loading intelligence feed...</div>
+  if (feed.length === 0) return <div className="soc-empty">Collecting threat intelligence data — system online</div>
+  const isLive = scraperStatus?.internet_connected && scraperStatus?.source_live > 0
+  return (
+    <div className="soc-versions">
+      {!isLive && <div style={{fontSize:7,color:'var(--accent-yellow)',marginBottom:4,padding:'2px 4px',background:'rgba(245,158,11,0.1)',borderRadius:3}}>⚠ OFFLINE MODE — showing reference data</div>}
+      {feed.map((t, i) => {
+        const srcColor = { reddit_cyber: '#ff4500', hackernews: '#f60', arxiv_cyber: '#8b5cf6', bleepingcomputer: '#06b6d4', thehackernews: '#ef4444' }
+        const color = srcColor[t.source] || '#64748b'
+        return (
+          <div key={i} className="soc-ver" style={{ fontSize: 10, borderLeft: `2px solid ${color}`, paddingLeft: 6 }}>
+            <span className="soc-tag" style={{ background: color, marginRight: 6 }}>{t.source || 'threat'}</span>
+            <span style={{ color: 'var(--text-secondary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {t.description?.slice(0, 120) || t.instruction?.slice(0, 80) || t.url?.slice(0, 60) || t.ioc?.slice(0, 40) || '-'}
+            </span>
+            <span className="soc-ver-time">{new Date(t.t || Date.now()).toLocaleTimeString()}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function LiveWorldTracker() {
+  const [mapData, setMapData] = useState([])
+  const [agencyAct, setAgencyAct] = useState([])
+  const [companyAtt, setCompanyAtt] = useState([])
+  const [total, setTotal] = useState(0)
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const [mapR, agR, coR] = await Promise.all([
+          fetch('/api/threats/map').then(r=>r.json()),
+          fetch('/api/agencies/activity').then(r=>r.json()),
+          fetch('/api/companies/attacks').then(r=>r.json()),
+        ])
+        setMapData(mapR.map || [])
+        setTotal(mapR.total_threats_mapped || 0)
+        setAgencyAct(Object.entries(agR.agencies || {}).map(([k,v]) => ({id:k,...v})))
+        setCompanyAtt((coR.companies || []).map(c => ({name:c.name,attacks:c.total_attacks,current:c.current_threats})))
+      } catch {}
+    }
+    load()
+    const i = setInterval(load, 10000)
+    return () => clearInterval(i)
+  }, [])
+  const topThreats = mapData.slice(0, 10)
+  const totalWorldThreats = mapData.reduce((s, c) => s + c.count, 0)
+  return (
+    <>
+      <div className="charts-row">
+        <div className="chart-container">
+          <div className="chart-title">WORLD THREAT MAP <span className="chart-badge">{mapData.length} countries</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={topThreats.length > 0 ? topThreats : [{country:'...',count:0}]} layout="vertical">
+                <XAxis type="number" tick={{fontSize:8,fill:'#94a3b8'}} />
+                <YAxis type="category" dataKey="country" tick={{fontSize:8,fill:'#94a3b8'}} width={30} />
+                <Tooltip contentStyle={{background:'#1a2332',border:'1px solid #2d3a50',borderRadius:6,fontSize:10}} />
+                <Bar dataKey="count" radius={[0,3,3,0]}>
+                  {topThreats.map((e,i) => <Cell key={i} fill={e.count > totalWorldThreats/5 ? '#ef4444' : e.count > totalWorldThreats/10 ? '#f59e0b' : '#06b6d4'}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{fontSize:8,color:'var(--text-secondary)',textAlign:'center',marginTop:4}}>{totalWorldThreats.toLocaleString()} threats mapped across {mapData.length} countries</div>
+        </div>
+        <div className="chart-container">
+          <div className="chart-title">INTELLIGENCE AGENCY <span className="chart-badge">{agencyAct.length} agencies</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={agencyAct.length > 0 ? agencyAct.map(a => ({name:a.name,threats:a.total_threats||0})) : [{name:'...',threats:0}]}>
+                <XAxis dataKey="name" tick={{fontSize:7,fill:'#94a3b8'}} />
+                <YAxis tick={{fontSize:8,fill:'#94a3b8'}} />
+                <Tooltip contentStyle={{background:'#1a2332',border:'1px solid #2d3a50',borderRadius:6,fontSize:10}} />
+                <Bar dataKey="threats" radius={[3,3,0,0]}>
+                  {agencyAct.map((a,i) => <Cell key={i} fill={a.color||'#8b5cf6'}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </div>
+      <div className="charts-row">
+        <div className="chart-container">
+          <div className="chart-title">COMPANY ATTACKS <span className="chart-badge">{companyAtt.length} companies</span></div>
+          <div className="chart-wrap">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={companyAtt.length > 0 ? companyAtt : [{name:'...',attacks:0}]}>
+                <XAxis dataKey="name" tick={{fontSize:7,fill:'#94a3b8'}} angle={-20} textAnchor="end" height={40} />
+                <YAxis tick={{fontSize:8,fill:'#94a3b8'}} />
+                <Tooltip contentStyle={{background:'#1a2332',border:'1px solid #2d3a50',borderRadius:6,fontSize:10}} />
+                <Bar dataKey="attacks" fill="#f59e0b" radius={[3,3,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="chart-container">
+          <div className="chart-title">SOCIAL MEDIA FEED <span className="chart-badge">Reddit HN arXiv BC THN</span></div>
+          <div style={{height:'100%',overflow:'auto'}}>
+            <SocialFeed />
+          </div>
+        </div>
+      </div>
+    </>
   )
 }
 
@@ -82,7 +212,7 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
   }, [fetchAll])
 
   useEffect(() => {
-    const ws = new WebSocket(`${WS_PROTO}//${WS_HOST}/ws`)
+    const ws = new WebSocket(`${WS_PROTO}//${location.host}/ws`)
     wsRef.current = ws
     ws.onmessage = e => {
       try {
@@ -135,24 +265,27 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
         if (m.event === 'notification') {
           setActivity(p => [{ event: 'notif', data: m.data, t: m.t }, ...p].slice(0, 150))
         }
+
+        if (m.event === 'research_collected') {
+          setActivity(p => [{ event: 'research_collected', data: m.data, t: m.t }, ...p].slice(0, 150))
+        }
       } catch {}
     }
     ws.onclose = () => {
       setTimeout(() => {
         if (wsRef.current === ws) {
-          const w = new WebSocket(`${WS_PROTO}//${WS_HOST}/ws`)
+          const w = new WebSocket(`${WS_PROTO}//${location.host}/ws`)
           wsRef.current = w
         }
       }, 2000)
     }
-    return () => ws.close()
+    return () => { ws.close(); if (wsRef.current !== ws) wsRef.current?.close() }
   }, [fetchThreats])
 
   function generateAiInsight(m) {
     const types = m.data.types || {}
     const typeEntries = Object.entries(types)
     const topType = typeEntries.sort((a, b) => b[1] - a[1])[0]
-    const typeLabels = typeEntries.map(([k]) => k).join(', ')
     let insight = `Scan complete — ${m.data.count} threats. `
     if (topType) insight += `Dominant: ${topType[0]} (${topType[1]}). `
     if (m.data.count > 100) insight += '⚠ High volume detected. '
@@ -232,11 +365,12 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
     deep_research: `DEEP SCAN #${lastEvent.data.cycle}: ${lastEvent.data.count} threats across ${Object.keys(lastEvent.data.sources || {}).length} sources`,
     crawl: `CRAWL: ${lastEvent.data.count} pages, ${lastEvent.data.threat_pages || 0} threats`,
     passive_scan: `PASSIVE: ${lastEvent.data.count} targets analyzed`,
-    train_complete: `TRAINED v${lastEvent.data.version}: ${lastEvent.data.samples} samples → ModelScope`,
+    train_complete: `TRAINED v${lastEvent.data.version}: ${lastEvent.data.samples} samples to ModelScope`,
     train_status: 'TRAINING ON MODELScope CLOUD GPU...',
     insights: (lastEvent.data.insights?.[0]?.message) || 'Research insights ready',
     footprint: `FOOTPRINT: ${lastEvent.data.count} analyzed, ${lastEvent.data.malicious} malicious`,
     notif: lastEvent.data.title,
+    research_collected: `RESEARCH: ${lastEvent.data.threat_count} threats, ${lastEvent.data.countries_mapped} countries mapped`,
   }[lastEvent.event] : 'INITIALIZING...'
 
   const totalRiskScore = useMemo(() => allThreats.slice(0, 300).reduce((sum, t) => sum + (t.score || 0), 0), [allThreats])
@@ -249,8 +383,8 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
     <div>
       <div className="soc-header">
         <div className="soc-title">
-          <span className="soc-glitch">AURA</span>
-          <span className="soc-sub">CYBER THREAT INTELLIGENCE · AI-POWERED SOC</span>
+          <span className="soc-glitch">CORE</span>
+          <span className="soc-sub">CYBER THREAT INTELLIGENCE · AI-POWERED SOC · 24/7 REAL-TIME TRACKING</span>
         </div>
         <div className="soc-status">
           <span className={`soc-dot ${s.active ? '' : 'off'}`} />
@@ -276,7 +410,6 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
         </div>
       )}
 
-      {/* Live Threat Ticker */}
       <div className="threat-ticker-wrap">
         <div className="threat-ticker-inner">
           {allThreats.slice(0, 20).map((t, i) => {
@@ -292,7 +425,6 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
         </div>
       </div>
 
-      {/* Live Scraping Animation */}
       <div className="scan-wave">
         <div className="scan-wave-inner">
           {liveEntries.slice(0, 16).map(([name, info], i) => (
@@ -330,6 +462,9 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
         </div>
       )}
 
+      {/* LIVE WORLD TRACKER - Threat Map, Agencies, Companies, Social */}
+      <LiveWorldTracker />
+
       <div className="soc-stats">
         <div className="soc-stat critical">
           <div className="soc-stat-val">{(s.total_scraped || 0).toLocaleString()}</div>
@@ -344,12 +479,12 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
         <div className="soc-stat medium">
           <div className="soc-stat-val">{highValueThreats}</div>
           <div className="soc-stat-lbl">HIGH-VALUE THREATS</div>
-          <div className="soc-stat-sub">Risk score ≥ 40 · {totalRiskScore.toLocaleString()} total risk</div>
+          <div className="soc-stat-sub">{'Risk score >= 40'} | {totalRiskScore.toLocaleString()} total risk</div>
         </div>
         <div className="soc-stat low">
           <div className="soc-stat-val">{(s.training?.total_samples || 0).toLocaleString()}</div>
           <div className="soc-stat-lbl">TRAINED SAMPLES</div>
-          <div className="soc-stat-sub">{versions.length} versions · {s.training?.running ? 'TRAINING' : 'ModelScope'}</div>
+          <div className="soc-stat-sub">{versions.length} versions | {s.training?.running ? 'TRAINING' : 'ModelScope'}</div>
         </div>
       </div>
 
@@ -536,6 +671,11 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
           </div>
 
           <div className="soc-panel">
+            <div className="soc-panel-header">SOCIAL MEDIA & JOURNAL INTELLIGENCE <span className="soc-badge sec">5 SOURCES</span></div>
+            <SocialFeed />
+          </div>
+
+          <div className="soc-panel">
             <div className="soc-panel-header">MODEL SCOPE DATASETS <span className="soc-badge">{versions.length}</span></div>
             <div className="soc-versions">
               {versions.length > 0 ? [...versions].reverse().slice(0, 10).map((v, i) => (
@@ -567,15 +707,16 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
                   deep_research: `Deep #${d.cycle}: ${d.count} threats`,
                   crawl: `${d.count} pages, ${d.threat_pages || 0} threats`,
                   passive_scan: `${d.count} targets scanned`,
-                  train_complete: `v${d.version}: ${d.samples} samples → ModelScope`,
+                  train_complete: `v${d.version}: ${d.samples} samples to ModelScope`,
                   train_status: `${d.samples} samples training...`,
                   insights: (d.insights || []).slice(0, 2).map(x => x.message).join(' | ') || `${d.clusters} clusters`,
                   footprint: `${d.count} footprints, ${d.malicious} malicious`,
                   notif: d.title || '',
+                  research_collected: `${d.threat_count} threats, ${d.countries_mapped} countries`,
                 }[a.event] || ''
                 return (
                   <tr key={i} className="soc-tr">
-                    <td><span className={`soc-tag ${a.event === 'deep_research' ? 'cve' : a.event === 'crawl' || a.event === 'passive_scan' ? 'info' : a.event === 'train_complete' ? 'url' : a.event === 'footprint' ? 'ioc' : 'url'}`}>{a.event}</span></td>
+                    <td><span className={`soc-tag ${a.event === 'deep_research' ? 'cve' : a.event === 'crawl' || a.event === 'passive_scan' ? 'info' : a.event === 'train_complete' ? 'url' : a.event === 'footprint' ? 'ioc' : a.event === 'research_collected' ? 'url' : 'url'}`}>{a.event}</span></td>
                     <td style={{ fontWeight: 600 }}>{d.count || d.samples || '-'}</td>
                     <td className="soc-desc">{detail}</td>
                     <td className="soc-time">{new Date(a.t).toLocaleTimeString()}</td>
@@ -601,7 +742,6 @@ export default function Dashboard({ status: initialStatus, onThreatClick }) {
         </div>
       </div>
 
-      {/* Intelligence Agency Tracking */}
       <AgencyTracker />
     </div>
   )
@@ -619,40 +759,69 @@ const AGENCY_LIST = [
 
 function AgencyTracker() {
   const [agencies, setAgencies] = useState([])
+  const [agencyAct, setAgencyAct] = useState({})
   const [expanded, setExpanded] = useState(null)
+
   useEffect(() => {
-    fetch('/api/agencies').then(r => r.json()).then(d => setAgencies(Object.entries(d.agencies || []))).catch(() => {})
+    const load = async () => {
+      try {
+        const [agR, actR] = await Promise.all([
+          fetch('/api/agencies').then(r => r.json()),
+          fetch('/api/agencies/activity').then(r => r.json()),
+        ])
+        setAgencies(Object.entries(agR.agencies || {}))
+        setAgencyAct(actR.agencies || {})
+      } catch {}
+    }
+    load()
+    const i = setInterval(load, 15000)
+    return () => clearInterval(i)
   }, [])
+
   return (
     <div className="soc-panel">
       <div className="soc-panel-header">
-        INTELLIGENCE AGENCY TRACKING
+        INTELLIGENCE AGENCY TRACKING — PASSIVE OSINT
         <span className="soc-badge">{AGENCY_LIST.length} agencies</span>
-        <span className="soc-badge sec">PASSIVE OSINT</span>
+        <span className="soc-badge sec">REAL-TIME</span>
       </div>
       <div className="soc-sources" style={{ flexDirection: 'column', gap: 4 }}>
-        {AGENCY_LIST.map(a => (
-          <div key={a.id} className="soc-src-chip" style={{ borderColor: a.color, cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch' }}
-            onClick={() => setExpanded(expanded === a.id ? null : a.id)}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
-              <span className="soc-src-id" style={{ color: a.color }}>{a.id.toUpperCase()}</span>
-              <span style={{ fontSize: 10, fontWeight: 600 }}>{a.name}</span>
-              <span style={{ fontSize: 8, color: 'var(--text-secondary)' }}>{a.country}</span>
-              <span style={{ fontSize: 8, color: 'var(--text-secondary)', marginLeft: 'auto' }}>{a.focus}</span>
-            </div>
-            {expanded === a.id && agencies.filter(([k]) => k === a.id).map(([key, profile]) => (
-              <div key={key} style={{ marginTop: 6, padding: 6, background: 'var(--bg-primary)', borderRadius: 4, fontSize: 9 }}>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                  <div><strong style={{ color: a.color }}>Known Ops:</strong> {profile.known_ops?.join(', ') || '—'}</div>
-                  <div><strong style={{ color: a.color }}>Tactics:</strong> {profile.tactics?.join(', ') || '—'}</div>
-                  <div><strong style={{ color: a.color }}>Targets:</strong> {profile.targets?.join(', ') || '—'}</div>
-                  <div><strong style={{ color: a.color }}>Tools:</strong> {profile.tools?.join(', ') || '—'}</div>
-                  <div><strong style={{ color: a.color }}>Last Seen:</strong> {profile.last_seen || '—'}</div>
-                </div>
+        {AGENCY_LIST.map(a => {
+          const live = agencyAct[a.id] || {}
+          const threatCount = live.total_threats || 0
+          return (
+            <div key={a.id} className="soc-src-chip" style={{ borderColor: a.color, cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch' }}
+              onClick={() => setExpanded(expanded === a.id ? null : a.id)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+                <span className="soc-src-id" style={{ color: a.color }}>{a.id.toUpperCase()}</span>
+                <span style={{ fontSize: 10, fontWeight: 600 }}>{a.name}</span>
+                <span style={{ fontSize: 8, color: 'var(--text-secondary)' }}>{a.country}</span>
+                <span style={{ fontSize: 8, color: threatCount > 10 ? '#ef4444' : threatCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontWeight: 600 }}>{threatCount} threats</span>
+                <span style={{ fontSize: 8, color: 'var(--text-secondary)', marginLeft: 'auto' }}>{a.focus}</span>
               </div>
-            ))}
-          </div>
-        ))}
+              {live.timeline && live.timeline.length > 0 && (
+                <div style={{ display: 'flex', gap: 2, marginTop: 4, height: 16, alignItems: 'flex-end' }}>
+                  {live.timeline.slice(-20).map((p, i) => (
+                    <div key={i} style={{ width: '4%', height: `${Math.min(100, (p.count || 1) * 10)}%`, background: a.color, opacity: 0.7, borderRadius: '1px 1px 0 0' }} title={`#${p.cycle}: ${p.count}`} />
+                  ))}
+                </div>
+              )}
+              {expanded === a.id && agencies.filter(([k]) => k === a.id).map(([key, profile]) => (
+                <div key={key} style={{ marginTop: 6, padding: 6, background: 'var(--bg-primary)', borderRadius: 4, fontSize: 9 }}>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    <div><strong style={{ color: a.color }}>Known Ops:</strong> {profile.known_ops?.join(', ') || '—'}</div>
+                    <div><strong style={{ color: a.color }}>Tactics:</strong> {profile.tactics?.join(', ') || '—'}</div>
+                    <div><strong style={{ color: a.color }}>Targets:</strong> {profile.targets?.join(', ') || '—'}</div>
+                    <div><strong style={{ color: a.color }}>Tools:</strong> {profile.tools?.join(', ') || '—'}</div>
+                    {live.tools_detected && live.tools_detected.length > 0 && (
+                      <div><strong style={{ color: '#ef4444' }}>Detected in Wild:</strong> {live.tools_detected.join(', ')}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        })}
       </div>
     </div>
   )

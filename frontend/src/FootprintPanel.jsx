@@ -1,12 +1,14 @@
 import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 
-export default function FootprintPanel({ status, feedData }) {
+export default function FootprintPanel({ feedData }) {
   const [monitored, setMonitored] = useState([])
   const [liveFootprints, setLiveFootprints] = useState([])
   const [target, setTarget] = useState('')
   const [manualResult, setManualResult] = useState(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [error, setError] = useState(null)
+  const [wsConnected, setWsConnected] = useState(false)
 
   useEffect(() => {
     if (feedData?.footprints) setLiveFootprints(feedData.footprints)
@@ -14,7 +16,7 @@ export default function FootprintPanel({ status, feedData }) {
 
   useEffect(() => {
     const f = () => {
-      fetch('/api/monitor?limit=50').then(r => r.json()).then(setMonitored).catch(() => {})
+      fetch('/api/monitor?limit=50').then(r => r.json()).then(d => setMonitored(Array.isArray(d) ? d : [])).catch(() => {})
     }
     f()
     const i = setInterval(f, 4000)
@@ -22,18 +24,24 @@ export default function FootprintPanel({ status, feedData }) {
   }, [])
 
   useEffect(() => {
-    const host = location.host.includes('5173') ? 'localhost:8000' : location.host
+    const host = import.meta.env.DEV ? 'localhost:8000' : location.host
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${host}/ws`)
-    ws.onmessage = e => {
-      try {
-        const m = JSON.parse(e.data)
-        if (m.event === 'footprint') {
-          setLiveFootprints(p => [{ count: m.data.count, malicious: m.data.malicious, t: m.t }, ...p].slice(0, 100))
-        }
-      } catch {}
-    }
-    return () => ws.close()
+    let ws
+    try {
+      ws = new WebSocket(`${proto}//${host}/ws`)
+      ws.onopen = () => setWsConnected(true)
+      ws.onmessage = e => {
+        try {
+          const m = JSON.parse(e.data)
+          if (m.event === 'footprint') {
+            setLiveFootprints(p => [{ count: m.data.count, malicious: m.data.malicious, t: m.t }, ...p].slice(0, 100))
+          }
+        } catch {}
+      }
+      ws.onerror = () => setError('WebSocket connection failed')
+      ws.onclose = () => setWsConnected(false)
+    } catch { setError('Failed to create WebSocket') }
+    return () => { if (ws) ws.close() }
   }, [])
 
   const stats = useMemo(() => {
@@ -115,9 +123,10 @@ export default function FootprintPanel({ status, feedData }) {
 
   return (
     <div>
+      {error && <div className="explain-bar" style={{borderColor:'var(--accent-yellow)'}}><span className="explain-icon">⚠</span><div style={{color:'var(--accent-yellow)'}}>{error}</div></div>}
       <div className="terminal-bar">
         <span className="glitch">REAL-TIME FOOTPRINT MONITOR</span>
-        <span className="blink">{liveFootprints.length > 0 || monitored.length > 0 ? 'TRACKING' : 'IDLE'}</span>
+        <span className="blink">{liveFootprints.length > 0 || monitored.length > 0 ? 'TRACKING' : 'IDLE'} · WS: {wsConnected ? '✓' : '✗'}</span>
       </div>
 
       <div className="soc-stats">

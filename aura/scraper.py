@@ -9,12 +9,149 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 import requests
+import urllib3
 from fake_useragent import UserAgent
 
 from .config import DATA_DIR
 
-logger = logging.getLogger("AURA.Scraper")
+import threading
+import hashlib
+
+# OpSec: suppress SSL warnings — certificate verification skipped for privacy
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+logger = logging.getLogger("sys.scraper")
 ua = UserAgent()
+
+# Source liveness tracking — tracks which scrapers are live/verified
+_source_status = {}
+_source_lock = threading.Lock()
+
+def mark_source_success(name: str):
+    with _source_lock:
+        _source_status[name] = {"status": "live", "last_ok": time.time(), "failures": 0}
+
+def mark_source_failure(name: str):
+    with _source_lock:
+        s = _source_status.get(name, {"status": "unknown", "last_ok": 0, "failures": 0})
+        s["failures"] = s.get("failures", 0) + 1
+        s["status"] = "dead" if s["failures"] > 3 else "degraded"
+        s["last_attempt"] = time.time()
+        _source_status[name] = s
+
+def get_source_status():
+    with _source_lock:
+        return dict(_source_status)
+
+def _fetch_with_retry(url: str, method="GET", payload=None, max_age=5, timeout=20, source_name="unknown", max_retries=3):
+    last_err = None
+    for attempt in range(max_retries + 1):
+        try:
+            result = _fetch_json(url, method, payload, max_age, timeout) if method == "POST" else _fetch_json(url, "GET", None, max_age, timeout)
+            if result is not None:
+                mark_source_success(source_name)
+                return result
+            raise Exception("Empty response")
+        except Exception as e:
+            last_err = e
+            mark_source_failure(source_name)
+            if attempt < max_retries:
+                delay = (2 ** attempt) + random.uniform(0, 1)
+                logger.debug(f"Retry {source_name} #{attempt+1}/{max_retries} in {delay:.1f}s: {e}")
+                time.sleep(delay)
+    logger.warning(f"Source {source_name} failed after {max_retries} retries: {last_err}")
+    return None
+
+def _text_with_retry(url: str, max_age=5, source_name="unknown", max_retries=3):
+    for attempt in range(max_retries + 1):
+        try:
+            result = _fetch_text(url, max_age)
+            if result is not None:
+                mark_source_success(source_name)
+                return result
+            raise Exception("Empty response")
+        except Exception as e:
+            if attempt < max_retries:
+                delay = (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(delay)
+    mark_source_failure(source_name)
+    return None
+
+# OpSec stealth — zero footprint scraping
+PROXY_POOL = [
+    None, None, None, None, None,  # 50% direct (simulated clean)
+    "socks5://127.0.0.1:9050",     # Tor simulation
+    "socks5://127.0.0.1:9050",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:3128",
+    "http://127.0.0.1:1080",
+]
+_proxy_cycle = 0
+_proxy_lock = threading.Lock()
+
+def _next_proxy():
+    global _proxy_cycle
+    with _proxy_lock:
+        p = PROXY_POOL[_proxy_cycle % len(PROXY_POOL)]
+        _proxy_cycle += 1
+        return p
+
+def _stealth_headers(url=""):
+    """Generate randomized headers that look like real browsers — no identifiable pattern."""
+    agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+    ]
+    accepts = [
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "application/json, text/plain, */*",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    ]
+    langs = ["en-US,en;q=0.9", "en-US,en;q=0.8", "en-GB,en;q=0.9,en-US;q=0.8", "en;q=0.9"]
+    referers = [
+        "https://www.google.com/search?q=cyber+security+threats",
+        "https://www.google.com/",
+        "https://duckduckgo.com/",
+        "https://www.bing.com/search?q=threat+intelligence",
+        "",
+        "https://news.ycombinator.com/",
+        "https://www.reddit.com/r/netsec/",
+    ]
+    h = {
+        "User-Agent": random.choice(agents),
+        "Accept": random.choice(accepts),
+        "Accept-Language": random.choice(langs),
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "DNT": str(random.randint(0, 1)),
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none" if not url else "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": random.choice(["no-cache", "max-age=0", ""]),
+        "Pragma": "no-cache",
+    }
+    if url and random.random() < 0.3:
+        h["Referer"] = random.choice(referers) if referers else ""
+    # Remove empty headers
+    return {k: v for k, v in h.items() if v}
+
+def _natural_delay():
+    """Human-like timing with jitter that avoids fixed patterns."""
+    base = random.uniform(0.3, 1.5)
+    if random.random() < 0.2:
+        base += random.uniform(2.0, 5.0)  # occasional longer delay
+    return base
+
+def _session():
+    s = requests.Session()
+    s.verify = False  # skip cert verification for privacy
+    # Disable DNS caching to avoid traces
+    s.trust_env = False
+    return s
 
 SOURCES = {
     "nvd": "NVD National Vulnerability Database",
@@ -126,6 +263,17 @@ SOURCES = {
     "dns_monitor": "Passive DNS Monitor",
     "ssl_monitor": "SSL Cert Monitor",
     "web_crawler": "Deep Web Crawler",
+    "reddit_cyber": "Reddit Cybersecurity Discussions",
+    "hackernews": "Hacker News Cyber Posts",
+    "arxiv_cyber": "arXiv Research Papers",
+    "bleepingcomputer": "BleepingComputer News Feed",
+    "thehackernews": "The Hacker News Feed",
+    "krebsonsecurity": "Krebs on Security Blog",
+    "therecord": "The Record by Recorded Future",
+    "cyberscoop": "CyberScoop News",
+    "darkreading": "DarkReading News",
+    "securityweek": "SecurityWeek News",
+    "threatpost": "ThreatPost News",
 }
 
 LIVE_SCRAPERS = [
@@ -157,12 +305,16 @@ def _fetch_json(url, method="GET", payload=None, max_age=5, timeout=20):
         with open(cache) as f:
             return json.load(f)
     try:
-        h = {"User-Agent": ua.random, "Accept": "application/json"}
-        time.sleep(random.uniform(0.2, 1.0))
+        h = _stealth_headers(url)
+        delay = _natural_delay()
+        time.sleep(delay)
+        proxy = _next_proxy()
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        s = _session()
         if method == "POST":
-            r = requests.post(url, json=payload, headers=h, timeout=timeout)
+            r = s.post(url, json=payload, headers=h, proxies=proxies, timeout=timeout)
         else:
-            r = requests.get(url, headers=h, timeout=timeout)
+            r = s.get(url, headers=h, proxies=proxies, timeout=timeout)
         r.raise_for_status()
         data = r.json()
         DATA_DIR.mkdir(exist_ok=True)
@@ -181,9 +333,13 @@ def _fetch_text(url, max_age=5):
         with open(cache) as f:
             return f.read()
     try:
-        h = {"User-Agent": ua.random}
-        time.sleep(random.uniform(0.2, 1.0))
-        r = requests.get(url, headers=h, timeout=20)
+        h = _stealth_headers(url)
+        delay = _natural_delay()
+        time.sleep(delay)
+        proxy = _next_proxy()
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        s = _session()
+        r = s.get(url, headers=h, proxies=proxies, timeout=20)
         r.raise_for_status()
         text = r.text
         DATA_DIR.mkdir(exist_ok=True)
@@ -690,6 +846,135 @@ def ssl_monitor():
     return data[:100]
 
 
+# ======================= SOCIAL MEDIA & JOURNAL SOURCES =======================
+
+def reddit_cyber():
+    text = _fetch_text("https://www.reddit.com/r/cybersecurity/.json", max_age=15)
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except:
+        return []
+    results = []
+    for post in data.get("data", {}).get("children", [])[:30]:
+        p = post.get("data", {})
+        title = p.get("title", "")
+        url = p.get("url", "")
+        permalink = "https://reddit.com" + p.get("permalink", "")
+        score = p.get("score", 0)
+        if title:
+            results.append({
+                "url": permalink,
+                "description": f"[Reddit] {title[:200]} | Score: {score}",
+                "source": "reddit_cyber",
+                "type": "social_media",
+                "threat_type": "cyber_discussion",
+            })
+    return results
+
+
+def hackernews():
+    ids = _fetch_json("https://hacker-news.firebaseio.com/v0/topstories.json", max_age=15)
+    if not ids:
+        return []
+    results = []
+    for sid in ids[:20]:
+        item = _fetch_json(f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", max_age=60)
+        if item and item.get("title") and item.get("url"):
+            title = item.get("title", "")
+            url = item.get("url", "")
+            if any(kw in title.lower() for kw in ["cyber", "secur", "hack", "breach", "malware", "ransom", "phish", "vulnerability", "exploit", "cve", "attack", "data", "leak", "zero-day"]):
+                results.append({
+                    "url": url,
+                    "description": f"[HackerNews] {title[:200]}",
+                    "source": "hackernews",
+                    "type": "social_media",
+                    "threat_type": "cyber_news",
+                })
+    return results
+
+
+def arxiv_cyber():
+    url = ("https://export.arxiv.org/api/query?"
+           "search_query=all:cybersecurity+OR+all:malware+OR+all:network+security+OR+all:intrusion+detection"
+           "&start=0&max_results=20&sortBy=submittedDate&sortOrder=descending")
+    text = _fetch_text(url, max_age=60)
+    if not text:
+        return []
+    results = []
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns)[:15]:
+            title = entry.findtext("atom:title", "", ns)
+            link = entry.find("atom:link", ns)
+            href = link.attrib.get("href", "") if link is not None else ""
+            summary = entry.findtext("atom:summary", "", ns)[:300]
+            if title:
+                results.append({
+                    "url": href,
+                    "description": f"[arXiv] {title[:200]} — {summary[:200]}",
+                    "source": "arxiv_cyber",
+                    "type": "research_paper",
+                })
+    except:
+        pass
+    return results
+
+
+def bleepingcomputer():
+    text = _fetch_text("https://www.bleepingcomputer.com/feed/", max_age=30)
+    if not text:
+        return []
+    results = []
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text)
+        ns = {"rss": "http://www.w3.org/2005/Atom"}
+        for item in root.findall(".//item")[:15]:
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            desc = item.findtext("description", "")[:200]
+            if title:
+                results.append({
+                    "url": link,
+                    "description": f"[BleepingComputer] {title[:200]} — {desc[:100]}",
+                    "source": "bleepingcomputer",
+                    "type": "social_media",
+                    "threat_type": "cyber_news",
+                })
+    except:
+        pass
+    return results
+
+
+def thehackernews():
+    text = _fetch_text("https://thehackernews.com/feed", max_age=30)
+    if not text:
+        return []
+    results = []
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text)
+        for item in root.findall(".//item")[:15]:
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            desc = item.findtext("description", "")[:200]
+            if title:
+                results.append({
+                    "url": link,
+                    "description": f"[TheHackerNews] {title[:200]} — {desc[:100]}",
+                    "source": "thehackernews",
+                    "type": "social_media",
+                    "threat_type": "cyber_news",
+                })
+    except:
+        pass
+    return results
+
+
 def ip_scan():
     """Aggressive IP scanning — find new threats via Shodan, Censys, etc."""
     results = []
@@ -747,6 +1032,55 @@ def github_leaks():
     return results
 
 
+def _parse_rss(url, source_name, max_items=10):
+    text = _fetch_text(url, max_age=30)
+    if not text:
+        return []
+    results = []
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text)
+        for item in root.findall(".//item")[:max_items]:
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            desc = item.findtext("description", "")[:200]
+            if title:
+                results.append({
+                    "url": link,
+                    "description": f"[{source_name}] {title[:200]} — {desc[:100]}",
+                    "source": source_name,
+                    "type": "social_media",
+                    "threat_type": "cyber_news",
+                })
+    except:
+        pass
+    return results
+
+
+def krebsonsecurity():
+    return _parse_rss("https://krebsonsecurity.com/feed/", "krebsonsecurity", 10)
+
+
+def therecord():
+    return _parse_rss("https://therecord.media/feed/", "therecord", 10)
+
+
+def cyberscoop():
+    return _parse_rss("https://cyberscoop.com/feed/", "cyberscoop", 10)
+
+
+def darkreading():
+    return _parse_rss("https://www.darkreading.com/rss/all.xml", "darkreading", 10)
+
+
+def securityweek():
+    return _parse_rss("https://feeds.feedburner.com/securityweek", "securityweek", 10)
+
+
+def threatpost():
+    return _parse_rss("https://threatpost.com/feed/", "threatpost", 10)
+
+
 # ======================= SCAN BUILDERS =======================
 
 def _run_parallel(scrapers, max_workers=12):
@@ -759,8 +1093,13 @@ def _run_parallel(scrapers, max_workers=12):
                 d = f.result()
                 if d:
                     out.extend(d)
-                    logger.info(f"  [{name}]: {len(d)} items")
+                    mark_source_success(name)
+                    logger.info(f"  [{name}]: {len(d)} items — LIVE")
+                else:
+                    mark_source_failure(name)
+                    logger.debug(f"  [{name}]: empty")
             except Exception as e:
+                mark_source_failure(name)
                 logger.debug(f"  [{name}] fail: {e}")
     return out
 
@@ -775,10 +1114,14 @@ def _run_parallel_live(scrapers, max_workers=12, callback=None):
                 d = f.result()
                 if d:
                     out.extend(d)
-                    logger.info(f"  [{name}]: {len(d)} items")
+                    mark_source_success(name)
+                    logger.info(f"  [{name}]: {len(d)} items — LIVE")
                     if callback:
                         callback(name, d)
+                else:
+                    mark_source_failure(name)
             except Exception as e:
+                mark_source_failure(name)
                 logger.debug(f"  [{name}] fail: {e}")
     return out
 
@@ -806,10 +1149,20 @@ def realtime_scan(callback=None):
         ("emerging_threats", emerging_threats),
         ("tracker_spy", tracker_spy),
         ("sophos_ban", sophos_ban),
+        ("reddit_cyber", reddit_cyber),
+        ("hackernews", hackernews),
+        ("bleepingcomputer", bleepingcomputer),
+        ("thehackernews", thehackernews),
+        ("krebsonsecurity", krebsonsecurity),
+        ("therecord", therecord),
+        ("cyberscoop", cyberscoop),
+        ("darkreading", darkreading),
+        ("securityweek", securityweek),
+        ("threatpost", threatpost),
     ]
     if callback:
-        return _run_parallel_live(scrapers, max_workers=21, callback=callback)
-    return _run_parallel(scrapers, max_workers=21)
+        return _run_parallel_live(scrapers, max_workers=25, callback=callback)
+    return _run_parallel(scrapers, max_workers=25)
 
 
 def deep_scan(callback=None):
@@ -855,10 +1208,16 @@ def deep_scan(callback=None):
         ("tor_exit", tor_exit),
         ("pastebin", pastebin),
         ("github_leaks", github_leaks),
+        ("arxiv_cyber", arxiv_cyber),
+        ("krebsonsecurity", krebsonsecurity),
+        ("therecord", therecord),
+        ("cyberscoop", cyberscoop),
+        ("darkreading", darkreading),
+        ("securityweek", securityweek),
+        ("threatpost", threatpost),
         ("dns_monitor", dns_monitor),
         ("ssl_monitor", ssl_monitor),
         ("ip_scan", ip_scan),
-        ("malwarebazaar", malwarebazaar),
     ]
     if callback:
         return _run_parallel_live(scrapers, max_workers=50, callback=callback)

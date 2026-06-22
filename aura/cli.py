@@ -13,7 +13,7 @@ from rich import box
 
 from . import __version__
 from .config import load_config, save_config, set_key, get
-from .scraper import scrape_cyber_threats
+from .scraper import realtime_scan
 from .cleaner import filter_and_clean, format_for_training
 from .analyzer import digital_footprint, scan_ports
 from .linux_knowledge import get_linux_training_data, get_categories, LINUX_COMMANDS_DATASET
@@ -33,7 +33,7 @@ console = Console()
 
 def cmd_scrape(args):
     console.print("[bold cyan]Scraping cyber threat intelligence...[/]")
-    data = scrape_cyber_threats()
+    data = realtime_scan()
     if not data:
         console.print("[yellow]No data scraped.[/]")
         return
@@ -68,7 +68,7 @@ def cmd_clean(args):
             return
     else:
         console.print("[yellow]No input file. Scraping fresh data...[/]")
-        raw = scrape_cyber_threats()
+        raw = realtime_scan()
 
     cleaned = filter_and_clean(raw)
     formatted = format_for_training(cleaned)

@@ -15,7 +15,7 @@ from fake_useragent import UserAgent
 
 from .config import DATA_DIR
 
-logger = logging.getLogger("AURA.PassiveScanner")
+logger = logging.getLogger("sys.scanner")
 ua = UserAgent()
 
 HEADERS = {"User-Agent": ua.random, "Accept": "application/json"}

@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 
 const AGENCIES = [
   { id: 'nsa', name: 'NSA', full: 'National Security Agency', country: 'USA', color: '#ef4444',
@@ -294,9 +295,10 @@ function AgencyDetail({ agency, threats, onClose, onThreatClick }) {
   )
 }
 
-export default function AgencyPanel({ feedData, onThreatClick }) {
+export default function AgencyPanel({ feedData, onThreatClick, forceTab }) {
   const [selectedAgency, setSelectedAgency] = useState(null)
-  const [activeTab, setActiveTab] = useState('agencies')
+  const [activeTab, setActiveTab] = useState(forceTab || 'agencies')
+  useEffect(() => { if (forceTab) setActiveTab(forceTab) }, [forceTab])
   const [spyAlerts, setSpyAlerts] = useState([])
   const [darkWatch, setDarkWatch] = useState([])
   const [liveAttacks, setLiveAttacks] = useState([])
@@ -315,7 +317,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
   const threats = feedData?.threats || []
 
   useEffect(() => {
-    const saved = localStorage.getItem('aura_investigation_history')
+    const saved = localStorage.getItem('sys_investigation_history')
     if (saved) {
       try { setBrowserHistory(JSON.parse(saved).slice(0, 50)) } catch {}
     }
@@ -430,7 +432,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
             {liveAttacks.slice(0, 30).map(a => (
               <div key={a.id} className="soc-src-chip" style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch', padding: '6px 10px',
                 borderColor: a.severity === 'critical' ? 'var(--accent-red)' : a.severity === 'high' ? 'var(--accent-yellow)' : 'var(--accent-cyan)' }}
-                onClick={() => { setSelectedAttack(a); addToHistory?.(a) }}>
+                onClick={() => { setSelectedAttack(a); const entry = { t: Date.now(), type: a.type, name: a.type, actor: a.actor, target: a.target, severity: a.severity, status: a.status }; const updated = [entry, ...browserHistory].slice(0, 50); setBrowserHistory(updated); localStorage.setItem('sys_investigation_history', JSON.stringify(updated)) }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
                   <span className={`soc-tag ${a.severity === 'critical' ? 'cve' : 'url'}`} style={{ fontSize: 7 }}>{a.severity.toUpperCase()}</span>
                   <span style={{ fontWeight: 600, fontSize: 10 }}>{a.type}</span>
@@ -451,6 +453,23 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
           <div className="soc-panel-header">
             INTELLIGENCE AGENCIES — 24/7 PASSIVE OSINT <span className="soc-badge">{AGENCIES.length}</span>
           </div>
+          <div className="charts-row" style={{ marginBottom: 8 }}>
+            <div className="chart-container" style={{ height: 120 }}>
+              <div className="chart-title">AGENCY DIGITAL FOOTPRINT <span className="chart-badge">IPs scanned</span></div>
+              <div className="chart-wrap">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={AGENCIES.map(a => ({ name: a.id.toUpperCase(), footprint: a.footprint, color: a.color }))}>
+                    <XAxis dataKey="name" tick={{ fontSize: 7, fill: '#94a3b8' }} />
+                    <YAxis tick={{ fontSize: 7, fill: '#94a3b8' }} />
+                    <Tooltip contentStyle={{ background: '#1a2332', border: '1px solid #2d3a50', borderRadius: 6, fontSize: 10 }} />
+                    <Bar dataKey="footprint" radius={[3, 3, 0, 0]}>
+                      {AGENCIES.map((a, i) => <Cell key={i} fill={a.color} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {AGENCIES.map(a => {
               const linkedCount = matchThreatsToAgency(a, threats).length
@@ -460,7 +479,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
                     const entry = { t: Date.now(), type: 'agency', id: a.id, name: a.name }
                     const updated = [entry, ...browserHistory].slice(0, 50)
                     setBrowserHistory(updated)
-                    localStorage.setItem('aura_investigation_history', JSON.stringify(updated))
+                    localStorage.setItem('sys_investigation_history', JSON.stringify(updated))
                     setSelectedAgency(a)
                   }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
@@ -515,7 +534,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
             {MAJOR_ATTACKS.slice().reverse().map((atk, i) => (
               <div key={i} className="soc-src-chip" style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch', padding: '8px 10px',
                 borderColor: atk.severity === 'critical' ? 'var(--accent-red)' : atk.severity === 'high' ? 'var(--accent-yellow)' : 'var(--accent-cyan)' }}
-                onClick={() => { setSelectedAttack({ type: atk.name, actor: atk.actor, target: atk.target, severity: atk.severity, details: `Impact: ${atk.impact} | Method: ${atk.method} | Year: ${atk.year}`, status: 'Historical', t: new Date().toISOString() }); const entry = { t: Date.now(), type: 'attack', name: atk.name, actor: atk.actor }; const updated = [entry, ...browserHistory].slice(0, 50); setBrowserHistory(updated); localStorage.setItem('aura_investigation_history', JSON.stringify(updated)) }}>
+                onClick={() => { setSelectedAttack({ type: atk.name, actor: atk.actor, target: atk.target, severity: atk.severity, details: `Impact: ${atk.impact} | Method: ${atk.method} | Year: ${atk.year}`, status: 'Historical', t: new Date().toISOString() }); const entry = { t: Date.now(), type: 'attack', name: atk.name, actor: atk.actor }; const updated = [entry, ...browserHistory].slice(0, 50); setBrowserHistory(updated); localStorage.setItem('sys_investigation_history', JSON.stringify(updated)) }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
                   <span className="soc-src-id" style={{ fontSize: 10 }}>{atk.year}</span>
                   <span style={{ fontWeight: 600, fontSize: 10 }}>{atk.name}</span>
@@ -566,7 +585,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
             {malwareData.map((m, i) => (
               <div key={i} className="soc-src-chip" style={{ cursor: 'pointer', flexDirection: 'column', alignItems: 'stretch', padding: '8px 10px',
                 borderColor: m.severity === 'critical' ? 'var(--accent-red)' : m.severity === 'high' ? 'var(--accent-yellow)' : 'var(--accent-cyan)' }}
-                onClick={() => { setSelectedMalware(selectedMalware?.name === m.name ? null : m); const entry = { t: Date.now(), type: 'malware', name: m.name, severity: m.severity }; const updated = [entry, ...browserHistory].slice(0, 50); setBrowserHistory(updated); localStorage.setItem('aura_investigation_history', JSON.stringify(updated)) }}>
+                onClick={() => { setSelectedMalware(selectedMalware?.name === m.name ? null : m); const entry = { t: Date.now(), type: 'malware', name: m.name, severity: m.severity }; const updated = [entry, ...browserHistory].slice(0, 50); setBrowserHistory(updated); localStorage.setItem('sys_investigation_history', JSON.stringify(updated)) }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
                   <span className={`soc-tag ${m.severity === 'critical' ? 'cve' : 'url'}`} style={{ fontSize: 7 }}>{m.severity.toUpperCase()}</span>
                   <span style={{ fontWeight: 600, fontSize: 10, color: m.severity === 'critical' ? 'var(--accent-red)' : 'var(--accent-yellow)' }}>{m.name}</span>
@@ -599,7 +618,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
         <div className="soc-panel">
           <div className="soc-panel-header">
             TOR NETWORK — 24/7 REAL-TIME ANALYSIS <span className="soc-badge">{torData.exit_nodes}</span>
-            <span className={torData.status === 'operational' ? 'soc-badge sec' : 'soc-badge cve'}>{torData.status.toUpperCase()}</span>
+            <span className={torData.status === 'operational' ? 'soc-badge sec' : 'soc-badge cve'}>{torData?.status?.toUpperCase?.() || 'UNKNOWN'}</span>
           </div>
           <div className="soc-stats" style={{ marginBottom: 10 }}>
             <div className="soc-stat critical" style={{ flex: 1, padding: 6 }}>
@@ -852,7 +871,7 @@ export default function AgencyPanel({ feedData, onThreatClick }) {
         <div className="soc-panel">
           <div className="soc-panel-header">
             INVESTIGATION HISTORY — LOCAL BROWSER <span className="soc-badge">{browserHistory.length}</span>
-            <button className="btn-icon" onClick={() => { setBrowserHistory([]); localStorage.removeItem('aura_investigation_history') }} style={{ color: 'var(--accent-red)', marginLeft: 'auto', fontSize: 9 }}>
+            <button className="btn-icon" onClick={() => { setBrowserHistory([]); localStorage.removeItem('sys_investigation_history') }} style={{ color: 'var(--accent-red)', marginLeft: 'auto', fontSize: 9 }}>
               CLEAR ALL
             </button>
           </div>

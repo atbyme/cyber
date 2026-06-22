@@ -5,21 +5,21 @@ const SRC_COLORS = ['#06b6d4','#f59e0b','#8b5cf6','#ef4444','#10b981','#ec4899',
 
 export default function ScraperPanel({ status, feedData, onThreatClick }) {
   const [liveScrapes, setLiveScrapes] = useState(() => {
-    try { return JSON.parse(sessionStorage.getItem('aura_live_scrapes') || '[]') } catch { return [] }
+    try { return JSON.parse(sessionStorage.getItem('sys_live_scrapes') || '[]') } catch { return [] }
   })
   const [allThreats, setAllThreats] = useState(() => {
-    try { return JSON.parse(sessionStorage.getItem('aura_threats') || '[]') } catch { return [] }
+    try { return JSON.parse(sessionStorage.getItem('sys_threats') || '[]') } catch { return [] }
   })
   const [sources, setSources] = useState({})
   const [scraping, setScraping] = useState(false)
   const wsRef = useRef(null)
 
   useEffect(() => {
-    try { sessionStorage.setItem('aura_live_scrapes', JSON.stringify(liveScrapes.slice(0, 100))) } catch {}
+    try { sessionStorage.setItem('sys_live_scrapes', JSON.stringify(liveScrapes.slice(0, 100))) } catch {}
   }, [liveScrapes])
 
   useEffect(() => {
-    try { sessionStorage.setItem('aura_threats', JSON.stringify(allThreats.slice(0, 200))) } catch {}
+    try { sessionStorage.setItem('sys_threats', JSON.stringify(allThreats.slice(0, 200))) } catch {}
   }, [allThreats])
 
   useEffect(() => {
@@ -28,7 +28,8 @@ export default function ScraperPanel({ status, feedData, onThreatClick }) {
   }, [feedData])
 
   useEffect(() => {
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host.includes('5173') ? 'localhost:8000' : location.host}/ws`)
+    const host = import.meta.env.DEV ? 'localhost:8000' : location.host
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/ws`)
     wsRef.current = ws
     ws.onmessage = e => {
       try {
@@ -43,11 +44,11 @@ export default function ScraperPanel({ status, feedData, onThreatClick }) {
       } catch {}
     }
     ws.onclose = () => setTimeout(() => {
-      const h = location.host.includes('5173') ? 'localhost:8000' : location.host
+      const h = import.meta.env.DEV ? 'localhost:8000' : location.host
       const p = location.protocol === 'https:' ? 'wss:' : 'ws:'
       if (wsRef.current === ws) wsRef.current = new WebSocket(`${p}//${h}/ws`)
     }, 2000)
-    return () => ws.close()
+    return () => { ws.close(); if (wsRef.current !== ws) wsRef.current?.close() }
   }, [])
 
   const trigger = async () => {

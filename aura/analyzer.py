@@ -2,8 +2,8 @@ import json
 import logging
 import re
 import socket
-import subprocess
-from datetime import datetime
+
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Set
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from fake_useragent import UserAgent
 
-logger = logging.getLogger("AURA.Analyzer")
+logger = logging.getLogger("sys.analyzer")
 ua = UserAgent()
 
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
@@ -85,10 +85,18 @@ def check_threatfox(ioc: str) -> Dict[str, Any]:
 
 def check_virustotal(ioc: str) -> Dict[str, Any]:
     try:
+        cfg = __import__("aura.config", fromlist=["load_config"]).load_config()
+        api_key = cfg.get("virustotal", {}).get("api_key") or cfg.get("api_keys", {}).get("virustotal")
+        if not api_key:
+            return {"malicious": False, "source": "virustotal", "error": "no_api_key"}
         r = requests.get(f"https://www.virustotal.com/api/v3/search?query={ioc}",
-                         headers={"User-Agent": ua.random, "x-apikey": "dummy"}, timeout=5)
-        if r.status_code != 401:
-            return {"malicious": r.status_code == 200, "source": "virustotal"}
+                         headers={"User-Agent": ua.random, "x-apikey": api_key}, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            malicious = data.get("data", [{}])[0].get("attributes", {}).get("last_analysis_stats", {}).get("malicious", 0) > 0 if data.get("data") else False
+            return {"malicious": malicious, "source": "virustotal"}
+        elif r.status_code == 401:
+            return {"malicious": False, "source": "virustotal", "error": "invalid_api_key"}
     except:
         pass
     return {"malicious": False}
@@ -96,11 +104,19 @@ def check_virustotal(ioc: str) -> Dict[str, Any]:
 
 def check_abuseipdb(ip: str) -> Dict[str, Any]:
     try:
-        r = requests.get(f"https://www.abuseipdb.com/check/{ip}/json",
-                         headers={"User-Agent": ua.random, "Key": "dummy"}, timeout=5)
+        cfg = __import__("aura.config", fromlist=["load_config"]).load_config()
+        api_key = cfg.get("abuseipdb", {}).get("api_key") or cfg.get("api_keys", {}).get("abuseipdb")
+        if not api_key:
+            return {"malicious": False, "source": "abuseipdb", "error": "no_api_key"}
+        r = requests.get(f"https://api.abuseipdb.com/api/v2/check",
+                         params={"ipAddress": ip, "maxAgeInDays": 90},
+                         headers={"User-Agent": ua.random, "Key": api_key, "Accept": "application/json"}, timeout=5)
         if r.status_code == 200:
             d = r.json()
-            return {"malicious": d.get("abuseConfidenceScore", 0) > 50, "source": "abuseipdb", "score": d.get("abuseConfidenceScore", 0)}
+            score = d.get("data", {}).get("abuseConfidenceScore", 0)
+            return {"malicious": score > 50, "source": "abuseipdb", "score": score}
+        elif r.status_code == 401:
+            return {"malicious": False, "source": "abuseipdb", "error": "invalid_api_key"}
     except:
         pass
     return {"malicious": False}
@@ -143,7 +159,7 @@ def analyze_url(url: str) -> Dict[str, Any]:
 
 
 def digital_footprint(target: str) -> Dict[str, Any]:
-    result = {"target": target, "timestamp": datetime.utcnow().isoformat(), "analysis": {}}
+    result = {"target": target, "timestamp": datetime.now(timezone.utc).isoformat(), "analysis": {}}
     if target.replace(".", "").isdigit():
         result["analysis"]["ip"] = analyze_ip(target)
     elif "." in target and not target.startswith("http"):
@@ -206,7 +222,7 @@ def check_breaches(email: str) -> List[Dict]:
 
 def company_intelligence(company: str) -> Dict:
     """Full company recon: WHOIS, DNS, SSL, Shodan, subdomains, ports, breaches"""
-    result = {"company": company, "timestamp": datetime.utcnow().isoformat(), "domains": [], "threats": [], "open_ports": [], "breaches": [], "samples": 0}
+    result = {"company": company, "timestamp": datetime.now(timezone.utc).isoformat(), "domains": [], "threats": [], "open_ports": [], "breaches": [], "samples": 0}
 
     domains_found = set()
     base = company.lower().replace(" ", "").replace("'", "").replace(".com", "").replace(".io", "")

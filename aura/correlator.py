@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Set, Tuple
 from urllib.parse import urlparse
 
-logger = logging.getLogger("AURA.Correlator")
+logger = logging.getLogger("sys.correlator")
 
 IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 DOMAIN_RE = re.compile(r"\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b")
